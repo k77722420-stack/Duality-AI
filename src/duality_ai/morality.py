@@ -15,6 +15,24 @@ Decisions:
                               the step proceeds and the leniency is on the
                               record;
   - "proceed"                 no hard clause is engaged.
+  - "conflict"                two or more engaged hard clauses carry
+                              incompatible directives and neither
+                              priority (R1) nor specificity (R2)
+                              separates them: the step does not proceed
+                              and the conflict is recorded in full for
+                              the operator (R3). Leniency can never
+                              break a tie between hard clauses (R4).
+
+Clause-conflict precedence (the R1-R4 stack) is drafted in
+``docs/clause-conflict-design.md`` — a recommendation awaiting the
+author's adoption decision, implemented here so it can be evaluated
+working. Precedence is consulted only on a collision: where every
+engaged hard clause agrees on its directive, the gate behaves exactly
+as it always has. Three clause fields, all optional, carry the
+mechanism, with defaults that reproduce the historical behavior for
+libraries that omit them: "directive" ("stop" | "proceed"; default
+"stop"), "priority" (integer; default 0), and "scope" (default
+"all steps", the broadest).
 """
 
 from __future__ import annotations
@@ -25,6 +43,42 @@ from pathlib import Path
 _DEFAULT_CLAUSES_PATH = (
     Path(__file__).resolve().parents[2] / "config" / "morality_clauses.json"
 )
+
+_ALL_STEPS = "all steps"
+
+
+def _directive(clause: dict) -> str:
+    """The outcome a hard clause demands when it engages.
+
+    Defaults to "stop": before the directive field existed, an engaged
+    hard clause could only ever stop a step.
+    """
+    return clause.get("directive", "stop")
+
+
+def _priority(clause: dict) -> int:
+    """The clause's declared precedence rank (R1). Default 0."""
+    return clause.get("priority", 0)
+
+
+def _scope(clause: dict) -> str:
+    """The clause's declared scope (R2). Default "all steps"."""
+    return clause.get("scope", _ALL_STEPS)
+
+
+def _specificity(scope: str) -> int:
+    """A documented proxy for scope narrowness (R2).
+
+    "all steps" is the broadest possible scope (specificity 0). Any
+    other scope is narrower, and a scope naming more qualifiers (more
+    words) is treated as narrower still. Scopes the proxy cannot
+    separate are equally specific; the gate then escalates under R3
+    rather than guessing at a distinction it cannot actually draw.
+    """
+    normalized = " ".join(str(scope).lower().split())
+    if normalized == _ALL_STEPS:
+        return 0
+    return len(normalized.split())
 
 
 class MoralityGate:
@@ -56,6 +110,16 @@ class MoralityGate:
         """Judge the proposal. Returns (decision, reasons)."""
         signals = proposal.get("signals", [])
         contexts = proposal.get("contexts", [])
+        engaged = [
+            (clause, [s for s in clause.get("signals", []) if s in signals])
+            for clause in self.hard_clauses
+        ]
+        engaged = [(clause, hits) for clause, hits in engaged if hits]
+        if len({_directive(clause) for clause, _ in engaged}) >= 2:
+            # Two or more engaged hard clauses demand incompatible
+            # outcomes: a collision, judged under the precedence stack
+            # (docs/clause-conflict-design.md), not by the legacy path.
+            return self._evaluate_conflict(engaged)
         reasons: list[dict] = []
         blocked = False
         leniency_applied = False
@@ -112,4 +176,187 @@ class MoralityGate:
             decision = "proceed_with_leniency"
         else:
             decision = "proceed"
+        return decision, reasons
+
+    def _evaluate_conflict(
+        self, engaged: list[tuple[dict, list[str]]]
+    ) -> tuple[str, list[dict]]:
+        """Judge a step on which hard clauses collide.
+
+        Applies the precedence stack drafted in
+        ``docs/clause-conflict-design.md``: R1 (declared priority),
+        R2 (scope specificity), R3 (fail-closed escalation as the
+        "conflict" outcome). Leniency is not consulted for the
+        colliding clauses (R4): it is mercy within the law, not a vote
+        between laws, and it can never break a tie between hard
+        clauses. Returns (decision, reasons) in the usual shape, with
+        one extra reason entry carrying the full conflict record.
+        """
+        parties = [clause for clause, _ in engaged]
+        hits_by_id = {clause["id"]: hits for clause, hits in engaged}
+        trace: list[str] = []
+
+        # R1 — the highest declared priority governs, if it speaks
+        # with one voice.
+        top_priority = max(_priority(clause) for clause in parties)
+        top = [c for c in parties if _priority(c) == top_priority]
+        top_ids = [c["id"] for c in top]
+        decisive = top
+        resolution: str | None = None
+        winner_directive: str | None = None
+        if len({_directive(c) for c in top}) == 1:
+            winner_directive = _directive(top[0])
+            resolution = "R1"
+            trace.append(
+                f"R1 (priority): the highest priority among the "
+                f"colliding hard clauses is {top_priority}, held by "
+                f"{top_ids}, which agree on the directive "
+                f"'{winner_directive}'. The higher-priority clause(s) "
+                "govern."
+            )
+        else:
+            trace.append(
+                f"R1 (priority): {top_ids} tie at the highest priority "
+                f"({top_priority}) with incompatible directives. R1 "
+                "cannot resolve the conflict."
+            )
+            # R2 — at equal priority, the narrower scope governs the
+            # specific case.
+            best = max(_specificity(_scope(c)) for c in top)
+            narrow = [c for c in top if _specificity(_scope(c)) == best]
+            narrow_ids = [c["id"] for c in narrow]
+            decisive = narrow
+            if len({_directive(c) for c in narrow}) == 1:
+                winner_directive = _directive(narrow[0])
+                resolution = "R2"
+                trace.append(
+                    f"R2 (specificity): among the tied clauses, "
+                    f"{narrow_ids} carry the narrowest scope "
+                    f"('{_scope(narrow[0])}') and agree on the "
+                    f"directive '{winner_directive}'. The more "
+                    "specific clause(s) govern the specific case."
+                )
+            else:
+                trace.append(
+                    f"R2 (specificity): {narrow_ids} remain tied — "
+                    f"equally specific scopes ('{_scope(narrow[0])}') "
+                    "with incompatible directives. R2 cannot resolve "
+                    "the conflict."
+                )
+                # R3 — fail closed; record everything; never silently
+                # pick one of two colliding hard clauses.
+                trace.append(
+                    "R3 (fail-closed escalation): the conflict is "
+                    "unresolved. The step does not proceed, and the "
+                    "conflict is recorded in full for the operator."
+                )
+        trace.append(
+            "R4 (leniency): leniency was not consulted for the "
+            "colliding clauses — leniency is mercy within the law, "
+            "not a vote between laws, and it can never break a tie "
+            "between hard clauses."
+        )
+
+        # The conflict record: one entry per incompatible pair. A
+        # resolved conflict is recorded over all colliding parties; an
+        # unresolved one over the finally tied set that R3 escalates.
+        pool = parties if resolution is not None else decisive
+        conflicts: list[dict] = []
+        for i, first in enumerate(pool):
+            for second in pool[i + 1:]:
+                if _directive(first) == _directive(second):
+                    continue
+                winner = None
+                if resolution is not None:
+                    winner = (
+                        first["id"]
+                        if _directive(first) == winner_directive
+                        else second["id"]
+                    )
+                conflicts.append(
+                    {
+                        "clauses": [first["id"], second["id"]],
+                        "directives": {
+                            first["id"]: _directive(first),
+                            second["id"]: _directive(second),
+                        },
+                        "rules_applied": trace,
+                        "resolution": resolution or "unresolved",
+                        "winner": winner,
+                    }
+                )
+
+        reasons: list[dict] = []
+        for clause in self.hard_clauses:
+            if clause["id"] not in hits_by_id:
+                reasons.append(
+                    {
+                        "clause": clause["id"],
+                        "outcome": "not_engaged",
+                        "detail": "None of the clause's signals are "
+                        "present in the proposed step.",
+                    }
+                )
+                continue
+            directive = _directive(clause)
+            engaged_signals = hits_by_id[clause["id"]]
+            if resolution is None:
+                outcome = "conflict"
+                detail = (
+                    f"Signal(s) {engaged_signals} engage this hard "
+                    f"clause, whose directive is '{directive}'. It "
+                    "collides with another engaged hard clause, and "
+                    "the collision is unresolved (see the conflict "
+                    "record). The step does not proceed."
+                )
+            elif directive == winner_directive:
+                outcome = "prevails"
+                detail = (
+                    f"Signal(s) {engaged_signals} engage this hard "
+                    f"clause, whose directive is '{directive}'. It "
+                    f"collided with another engaged hard clause and "
+                    f"prevailed under {resolution} (see the conflict "
+                    "record)."
+                )
+            else:
+                outcome = "overridden"
+                detail = (
+                    f"Signal(s) {engaged_signals} engage this hard "
+                    f"clause, whose directive is '{directive}'. It "
+                    f"collided with another engaged hard clause and "
+                    f"was overridden under {resolution} (see the "
+                    "conflict record)."
+                )
+            reasons.append(
+                {"clause": clause["id"], "outcome": outcome, "detail": detail}
+            )
+
+        if resolution is None:
+            decision = "conflict"
+            summary = {
+                "clause": "gate",
+                "outcome": "conflict",
+                "detail": (
+                    "Two or more hard clauses collide on this step "
+                    "and neither priority (R1) nor specificity (R2) "
+                    "separates them. Under R3 the step does not "
+                    "proceed; the conflict is recorded here in full "
+                    "for the operator."
+                ),
+                "conflicts": conflicts,
+            }
+        else:
+            decision = winner_directive
+            summary = {
+                "clause": "gate",
+                "outcome": "conflict_resolved",
+                "detail": (
+                    "Two or more hard clauses collided on this step; "
+                    f"{resolution} resolved the collision in favor of "
+                    f"the directive '{winner_directive}'. The full "
+                    "record follows."
+                ),
+                "conflicts": conflicts,
+            }
+        reasons.append(summary)
         return decision, reasons

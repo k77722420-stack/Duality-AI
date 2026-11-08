@@ -59,6 +59,6 @@ class DualityPipeline:
             ],
             "proposal": proposal,
             "decision": decision,
-            "released": decision != "stop",
+            "released": decision in ("proceed", "proceed_with_leniency"),
         }
         return trace

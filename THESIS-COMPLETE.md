@@ -796,7 +796,7 @@ saves. The memory's laws in force are data: `config/memory_policy.json`
 (half-life 30 days, prune threshold 0.05, protected tag
 `constitutional`, consolidation at 3 episodes per tag).
 
-**Tests.** The three suites pass: **38 tests in total, as of November 7,
+**Tests.** The three suites pass: **57 tests in total, as of November 7,
 2026** — pipeline, barrier, and memory — covering the flow end to end,
 the sizing and decode arithmetic including the ceiling, and the memory
 laws including chain tamper detection, both store backends, pruning
