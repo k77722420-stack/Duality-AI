@@ -1,7 +1,8 @@
 """Layer Three — the Memory Cloud: the system's long-term memory.
 
 Structural demonstration only. Layer Three is the memory of the Duality
-AI (design draft: docs/layer3-design.md): Layer One thinks, Layer Two
+AI (design: THESIS-LAYER-3.md; working draft: docs/layer3-design.md):
+Layer One thinks, Layer Two
 protects, Layer Three remembers. This module implements the *foundation*
 of that layer — the record schema, the provenance chain, the decay law,
 and a consolidation pass — over a pluggable store. It stores and
@@ -24,8 +25,10 @@ constructed, so the laws in force can be read, debated, and revised
 without touching this module — the same pattern as the morality gate's
 clause library.
 
-Design laws demonstrated here (all PROPOSED in the draft, pending the
-author's compare decisions):
+Design laws demonstrated here (the eight elements were ADOPTED by the
+author on November 7, 2026, as recorded in THESIS-LAYER-3.md; the
+numeric defaults they carry — half-life, prune threshold,
+consolidation trigger — remain revisable working values):
 
   - Two memories. Records are *episodic* (what happened) or *semantic*
     (what is known), and each carries an *owner*: the logical shelf,
