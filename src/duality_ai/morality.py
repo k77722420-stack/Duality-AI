@@ -14,7 +14,9 @@ Decisions:
                               leniency clause's stated condition holds —
                               the step proceeds and the leniency is on the
                               record;
-  - "proceed"                 no hard clause is engaged.
+  - "proceed"                 no hard clause is engaged, or every
+                              engaged hard clause carries the directive
+                              "proceed".
   - "conflict"                two or more engaged hard clauses carry
                               incompatible directives and neither
                               priority (R1) nor specificity (R2)
@@ -133,6 +135,27 @@ class MoralityGate:
                         "outcome": "not_engaged",
                         "detail": "None of the clause's signals are "
                         "present in the proposed step.",
+                    }
+                )
+                continue
+            if _directive(clause) == "proceed":
+                # An engaged clause whose directive is "proceed" speaks
+                # FOR the step: it never blocks, and leniency — mercy
+                # against a stop — has nothing to soften. (Audit fix,
+                # Nov 12, 2026: this path previously ignored the
+                # directive entirely, so an unopposed "proceed" clause
+                # fell through to the blocking branch below and the
+                # gate returned "stop" — the opposite of the decision
+                # the library configures.)
+                reasons.append(
+                    {
+                        "clause": clause["id"],
+                        "outcome": "engaged_proceed",
+                        "detail": (
+                            f"Signal(s) {engaged} engage this hard "
+                            "clause, whose directive is 'proceed'. The "
+                            "clause affirmatively passes the step."
+                        ),
                     }
                 )
                 continue

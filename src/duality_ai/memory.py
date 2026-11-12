@@ -457,8 +457,18 @@ class MemoryCloud:
         if text is not None:
             needle = text.lower()
             found = [r for r in found if needle in r.content.lower()]
+        # tags are copied explicitly: dataclasses.replace is shallow,
+        # so without the copy a recalled record would share its tags
+        # list with the stored record, and a caller's append would
+        # rewrite stored memory outside the write path — invalidating
+        # hashes and changing pruning eligibility. (Audit fix,
+        # Nov 12, 2026.)
         ranked = [
-            replace(r, strength=self._decayed_strength(r, moment))
+            replace(
+                r,
+                tags=list(r.tags),
+                strength=self._decayed_strength(r, moment),
+            )
             for r in found
         ]
         ranked.sort(key=lambda r: r.strength, reverse=True)
