@@ -505,7 +505,24 @@ class MemoryCloud:
 
         created: list[MemoryRecord] = []
         marked: list[MemoryRecord] = []
-        for tag, cluster in pending.items():
+        claimed: set[str] = set()
+        # Each episode is distilled at most once (review finding 5):
+        # an episode carrying several ripe tags is claimed by the most
+        # specific (smallest) cluster first; later clusters count only
+        # the episodes still unclaimed.
+        # Amendment (Lux, at Ken's direction, 2026-11-13): bookkeeping
+        # tags (gate-decision, gate:*, any tag containing ':') claim
+        # LAST. In Trace A the original order let 'gate:proceed' claim
+        # the episodes and the topic summary ('pipeline-run') vanished;
+        # topic tags are the knowledge, gate tags are the bookkeeping.
+        def _bookkeeping(tag: str) -> bool:
+            return tag.startswith("gate") or ":" in tag
+
+        for tag, cluster in sorted(
+            pending.items(),
+            key=lambda item: (_bookkeeping(item[0]), len(item[1]), item[0]),
+        ):
+            cluster = [r for r in cluster if r.id not in claimed]
             if len(cluster) < self.consolidate_min_episodes:
                 continue
             summary = self.remember(
@@ -521,6 +538,7 @@ class MemoryCloud:
                 continue  # the write hook refused the distillation
             created.append(summary)
             for record in cluster:
+                claimed.add(record.id)
                 if CONSOLIDATED_TAG not in record.tags:
                     record.tags.append(CONSOLIDATED_TAG)
                 marked.append(record)

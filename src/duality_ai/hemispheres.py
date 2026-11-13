@@ -6,43 +6,22 @@ checks and raises flags; the creative hemisphere produces a fixed menu of
 alternative framings. In the full concept (THESIS.md, Section 4) these
 stages are reasoning processes built on the base model; nothing here
 reasons, and nothing here pretends to.
+
+The keyword lists live in ``markers.py`` (word-bounded, shared with the
+live pipeline). Leniency contexts are withheld from a request that asks
+for the flagged artifact itself or for evasion (``markers.performs``):
+a context label alone never satisfies L1/L2's content condition.
 """
 
 from __future__ import annotations
 
-# Signal vocabularies for the demonstration. Deliberately tiny and crude:
-# they exist so the flow can be exercised end-to-end, not to judge text.
-_WRONGDOING_MARKERS = (
-    "steal", "hack", "forge", "rob", "shoplift", "break into",
-    "bypass the", "crack the password",
-)
-_DECEPTION_MARKERS = (
-    "fake review", "fake five-star", "fake 5-star", "make it sound like",
-    "pretend to be", "lie to", "mislead",
-)
-_EDUCATIONAL_MARKERS = (
-    "class", "course", "teach", "lesson", "school", "study",
-    "how does", "how do", "explain how", "history of", "learn",
-)
-_DEFENSIVE_MARKERS = (
-    "protect", "prevent", "defend", "secure my", "keep my", "avoid being",
-    "stop thieves", "stay safe",
-)
-
-
-def _contains_any(text: str, markers: tuple[str, ...]) -> bool:
-    return any(marker in text for marker in markers)
+from .markers import detect_signals as _detect_signals
+from .markers import performs, skeleton_labels
 
 
 def detect_signals(request: dict) -> list[str]:
     """Return the content signals present in a request (demonstration set)."""
-    text = request["lower"]
-    signals = []
-    if _contains_any(text, _WRONGDOING_MARKERS):
-        signals.append("wrongdoing")
-    if _contains_any(text, _DECEPTION_MARKERS):
-        signals.append("deception")
-    return sorted(signals)
+    return _detect_signals(request["lower"])
 
 
 def detect_contexts(request: dict) -> list[str]:
@@ -50,15 +29,13 @@ def detect_contexts(request: dict) -> list[str]:
 
     Contexts are what the morality gate's leniency clauses key on: a
     flagged element that appears for an educational or protective purpose
-    is a different step from the same element appearing bare.
+    is a different step from the same element appearing bare. A request
+    that performs or enables the act earns no context.
     """
     text = request["lower"]
-    contexts = []
-    if _contains_any(text, _EDUCATIONAL_MARKERS):
-        contexts.append("educational")
-    if _contains_any(text, _DEFENSIVE_MARKERS):
-        contexts.append("defensive")
-    return sorted(contexts)
+    if performs(text):
+        return []
+    return skeleton_labels(text)
 
 
 class LogicalHemisphere:
