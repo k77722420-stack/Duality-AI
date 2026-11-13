@@ -35,23 +35,7 @@ by the other two.
 
 *Layer 1 thinks. Layer 2 protects. Layer 3 remembers.*
 
-```mermaid
-flowchart TD
-    Q["A person asks something"] --> CORE
-    subgraph CORE["LAYER 1 — THINKS: the Duality core"]
-        BASE["Base model — any LLM"] --> LOG["Logical hemisphere: facts, steps, checks"]
-        BASE --> CRE["Creative hemisphere: ideas, images, story"]
-        LOG["Logical hemisphere: facts, steps, checks"] --> HUB["THE HUB: weighs both sides into one answer"]
-        CRE["Creative hemisphere: ideas, images, story"] --> HUB
-        HUB --> GATE{"Morality gate: clauses checked, leniency within reason"}
-    end
-    GATE -->|clears the clauses| GO["The answer or action proceeds"]
-    GATE -->|breaks a clause| STOP["Stopped, with the reason shown"]
-    BAR["LAYER 2 — PROTECTS: the Barrier, a perimeter of gatekeeper checks around Layer 1"] -.-> CORE
-    MEM["LAYER 3 — REMEMBERS: the Memory Cloud. Strength halves every 30 days. Below 0.05 a memory is pruned, unless tagged constitutional"]
-    GO --> MEM
-    MEM -.->|recall feeds the next answer| BASE
-```
+![The Duality AI design — three layers in one picture](docs/images/duality-architecture.png)
 
 **The math of forgetting (Layer 3).** Every memory's strength follows one equation:
 
