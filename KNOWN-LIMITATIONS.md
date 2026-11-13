@@ -16,6 +16,8 @@ Each entry names the limitation, states plainly what it is, points to
 where it lives, and says what would retire it. This is a museum, not
 an apology: the exhibits are labeled, not lamented.
 
+> **Availability note:** the live-model layer (`src/duality_ai/live.py`), the experiment corpus and run data (`experiments/`), and `experiments/run_battery.py` are **not included in this public repository**. The results reported here are stated exactly as measured, and the corpus hash quoted in the results addendum lets anyone confirm the expectations were locked before the run — but the runs cannot be re-executed from this repository alone. Until the experiment files are published, treat these documents as a lab report, not a reproducible artifact.
+
 ---
 
 ## 1. The three skeletons are not wired together

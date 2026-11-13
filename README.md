@@ -11,8 +11,9 @@ clauses, tempered by *leniency within reason*. **Layer Two protects**:
 the Barrier, a perimeter of gatekeeper bots on the author's metaphor of
 the blood-brain barrier, inspecting everything that enters and leaves,
 diverting attacks into a sandbox, replicating under a strict sizing law,
-and communicating by encryption handshakes built on the geometry of the
-aperiodic hat tile. **Layer Three remembers**: the Memory Cloud, the
+and communicating by handshake designs built on the geometry of the
+aperiodic hat tile — an open problem, stated precisely in
+[docs/handshake-open-problem.md](docs/handshake-open-problem.md). **Layer Three remembers**: the Memory Cloud, the
 system's long-term past — episodic and semantic records, consolidation
 like sleep, provenance sealed into a hash chain, and graceful forgetting
 with one absolute exemption: the morality clauses are never forgettable.
@@ -168,6 +169,8 @@ by others is credited in [docs/related-work.md](docs/related-work.md);
 nothing in this repository claims another researcher's work as the
 author's.
 
+Contact: Kenneth Lee Blum Jr, Owner, Diverse Innovation — hello@diverseinnovationsd.com
+
 ## Repository structure
 
 ```
@@ -193,6 +196,9 @@ docs/
   leniency-audit-trail.md     the governance artifact, specified
   clause-conflict-design.md   drafted hard-clause precedence mechanism
   handshake-open-problem.md   the open problem, stated precisely
+  external-review-gemini-2026-11-07.md  Gemini's external red-team review
+  real-model-results.md       live-model results addendum (Nov 7 runs)
+  redteam-brief-gemini-2026-11-07.md  the briefing packet for that review
 src/duality_ai/
   base.py                     Layer One, stage 1: base layer
   hemispheres.py              Layer One, stages 2–3: the two modes
@@ -212,4 +218,8 @@ tests/
   test_clause_conflicts.py    hard-clause precedence tests
   test_running_system_demo.py the two traces, asserted
   test_pipeline_conflict_release.py  a conflict never releases a step
+  conftest.py                 puts src/ on the path for pytest
+  test_audit_fixes.py         regression tests for the Nov 12 audit fixes
 ```
+
+Companion research: [HATWEAVE](https://github.com/k77722420-stack/HATWEAVE) — the aperiodic-geometry work Layer Two's handshake design draws on.
