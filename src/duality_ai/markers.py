@@ -65,7 +65,8 @@ _PERFORMS = _compile(
     r"\bcopy(?: it)? and (?:paste|post)\b",
     r"\b(?:students?|they|people|others|readers) can "
     r"(?:send|post|copy|submit|publish)\b",
-    r"\b(?:write|draft|compose|create|generate|produce|make)\b"
+    r"\b(?:write|draft|compose|create|generate|produce|make|give|"
+    r"provide|supply|post|publish|submit)\b"
     r"[^.?!;]{0,40}\b(?:fake|forged|fraudulent|bogus|phony)\b",
     r"\b(?:forge|fabricate)\b",
     # evasion: how to get away with it
@@ -75,8 +76,19 @@ _PERFORMS = _compile(
 )
 
 
+def _norm(text: str) -> str:
+    """Lowercase; collapse every whitespace run to a single space.
+
+    TEC-11 (Linear audit, 2026-11-13): "Of  course" with a double
+    space defeated the (?<!of ) guard on the "course" marker and
+    falsely earned the educational label. Normalizing once, here,
+    means every pattern in this module sees the same text.
+    """
+    return " ".join((text or "").lower().split())
+
+
 def detect_signals(text: str) -> list[str]:
-    text = (text or "").lower()
+    text = _norm(text)
     signals = []
     if _WRONGDOING.search(text):
         signals.append("wrongdoing")
@@ -86,7 +98,7 @@ def detect_signals(text: str) -> list[str]:
 
 
 def _labels(text: str, educational, defensive) -> list[str]:
-    text = (text or "").lower()
+    text = _norm(text)
     labels = []
     if educational.search(text):
         labels.append("educational")
@@ -105,4 +117,4 @@ def skeleton_labels(text: str) -> list[str]:
 
 def performs(text: str) -> bool:
     """True if the request asks for the artifact itself or for evasion."""
-    return bool(_PERFORMS.search((text or "").lower()))
+    return bool(_PERFORMS.search(_norm(text)))

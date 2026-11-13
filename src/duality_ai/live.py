@@ -143,6 +143,29 @@ def _validate_logical(data: dict) -> dict:
             f"logical hemisphere raised signal(s) outside the declared "
             f"vocabulary {list(SIGNAL_VOCABULARY)}: {outside}."
         )
+    # TEC-8 (Linear audit, 2026-11-13): the remaining fields were
+    # presence-checked only. A null "flags" crashed the merge; null
+    # pros/cons/checks were carried into the proposal. Type-check
+    # them all; anything malformed fails closed like bad JSON.
+    for key in ("flags", "pros", "cons"):
+        value = data[key]
+        if not isinstance(value, list) or not all(
+            isinstance(item, str) for item in value
+        ):
+            raise _FormatFailure(
+                f"logical hemisphere {key!r} is not a list of strings."
+            )
+    checks = data["checks"]
+    if not isinstance(checks, list) or not all(
+        isinstance(check, dict)
+        and isinstance(check.get("name"), str)
+        and isinstance(check.get("passed"), bool)
+        for check in checks
+    ):
+        raise _FormatFailure(
+            "logical hemisphere 'checks' is not a list of "
+            "{name, passed} objects."
+        )
     # Optional key: a missing or unrecognized stance is not a format
     # failure; it simply earns no leniency (see granted_contexts).
     stance = data.get("stance")
@@ -166,6 +189,13 @@ def _validate_creative(data: dict) -> dict:
                 "creative hemisphere alternative lacks an 'id' or "
                 "'text' string."
             )
+    if all(
+        not alternative["text"].strip() for alternative in alternatives
+    ):
+        raise _FormatFailure(
+            "creative hemisphere alternatives are all blank; a blank "
+            "framing is not a framing."
+        )
     return data
 
 
@@ -234,6 +264,18 @@ class LivePipeline:
         chosen_text = None
         for alternative in creative["alternatives"]:
             alt_id = alternative["id"]
+            if not alternative["text"].strip():
+                # TEC-8: a blank framing cannot "survive" the hub;
+                # it carries nothing and answers no flag.
+                rejected.append(
+                    {
+                        "source": "creative",
+                        "item": alt_id,
+                        "why": "The framing is blank; a blank framing "
+                        "cannot carry the step.",
+                    }
+                )
+                continue
             if alt_id == "alt-direct" and flags:
                 rejected.append(
                     {

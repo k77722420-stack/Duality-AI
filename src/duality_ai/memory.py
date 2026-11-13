@@ -500,8 +500,14 @@ class MemoryCloud:
         for record in episodes:
             if CONSOLIDATED_TAG in record.tags:
                 continue
-            for tag in record.tags:
-                pending.setdefault(tag, []).append(record)
+            # TEC-9 (Linear audit, 2026-11-13): count DISTINCT
+            # episode ids per tag. One episode wearing the same tag
+            # three times is one episode; it previously distilled
+            # into "knowledge" all by itself.
+            for tag in set(record.tags):
+                cluster = pending.setdefault(tag, [])
+                if all(existing.id != record.id for existing in cluster):
+                    cluster.append(record)
 
         created: list[MemoryRecord] = []
         marked: list[MemoryRecord] = []
