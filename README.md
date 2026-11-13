@@ -31,6 +31,36 @@ by the other two.
 > weaknesses are published, not buried: see
 > [KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md), the failure museum.
 
+## The design, in one picture
+
+*Layer 1 thinks. Layer 2 protects. Layer 3 remembers.*
+
+```mermaid
+flowchart TD
+    Q["A person asks something"] --> CORE
+    subgraph CORE["LAYER 1 — THINKS: the Duality core"]
+        BASE["Base model — any LLM"] --> LOG["Logical hemisphere: facts, steps, checks"]
+        BASE --> CRE["Creative hemisphere: ideas, images, story"]
+        LOG["Logical hemisphere: facts, steps, checks"] --> HUB["THE HUB: weighs both sides into one answer"]
+        CRE["Creative hemisphere: ideas, images, story"] --> HUB
+        HUB --> GATE{"Morality gate: clauses checked, leniency within reason"}
+    end
+    GATE -->|clears the clauses| GO["The answer or action proceeds"]
+    GATE -->|breaks a clause| STOP["Stopped, with the reason shown"]
+    BAR["LAYER 2 — PROTECTS: the Barrier, a perimeter of gatekeeper checks around Layer 1"] -.-> CORE
+    MEM["LAYER 3 — REMEMBERS: the Memory Cloud. Strength halves every 30 days. Below 0.05 a memory is pruned, unless tagged constitutional"]
+    GO --> MEM
+    MEM -.->|recall feeds the next answer| BASE
+```
+
+**The math of forgetting (Layer 3).** Every memory's strength follows one equation:
+
+`strength(t) = starting strength × 0.5 ^ (t / 30 days)`
+
+![How a Duality memory fades — the 30-day half-life](docs/images/duality-memory-decay.png)
+
+*Policy source: `config/memory_policy.json` — 30-day half-life, prune threshold 0.05, `constitutional` memories never pruned. An unreinforced memory reaches the prune line at about day 130.*
+
 ## Read the theses
 
 | Document | What it argues |
