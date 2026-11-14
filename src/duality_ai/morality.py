@@ -170,19 +170,40 @@ class MoralityGate:
                 if found is not None:
                     covers[signal] = found
             if len(covers) == len(engaged):
-                cover = next(iter(covers.values()))
                 leniency_applied = True
+                covering = {c["id"]: c for c in covers.values()}
+                if len(covering) == 1:
+                    cover = next(iter(covering.values()))
+                    detail = (
+                        f"Signal(s) {engaged} engage this hard clause, "
+                        f"but leniency clause {cover['id']} applies: "
+                        f"its condition ('{cover['condition']}') holds "
+                        "in this context. The step proceeds and the "
+                        "leniency is recorded."
+                    )
+                else:
+                    # The record names EVERY covering clause (Linear
+                    # whole-tree audit, 2026-11-13): when cover is
+                    # split across clauses, naming only the first made
+                    # the audit trail under-report the leniency that
+                    # was actually granted.
+                    grants = "; ".join(
+                        f"leniency clause {found['id']} covers "
+                        f"'{signal}' (its condition "
+                        f"'{found['condition']}') holds"
+                        for signal, found in covers.items()
+                    )
+                    detail = (
+                        f"Signal(s) {engaged} engage this hard clause, "
+                        f"but leniency covers every engaged signal: "
+                        f"{grants} in this context. The step proceeds "
+                        "and the leniency is recorded."
+                    )
                 reasons.append(
                     {
                         "clause": clause["id"],
                         "outcome": "engaged_but_lenient",
-                        "detail": (
-                            f"Signal(s) {engaged} engage this hard clause, "
-                            f"but leniency clause {cover['id']} applies: "
-                            f"its condition ('{cover['condition']}') holds "
-                            "in this context. The step proceeds and the "
-                            "leniency is recorded."
-                        ),
+                        "detail": detail,
                     }
                 )
             else:
@@ -236,6 +257,14 @@ class MoralityGate:
         hits_by_id = {clause["id"]: hits for clause, hits in engaged}
         trace: list[str] = []
 
+        def scope_text(clauses: list[dict]) -> str:
+            """The tied clauses' scopes, honestly: one shared scope is
+            named once; differing scope strings are listed per clause
+            rather than attributing the first clause's scope to all."""
+            if len({_scope(c) for c in clauses}) == 1:
+                return f"'{_scope(clauses[0])}'"
+            return ", ".join(f"{c['id']}: '{_scope(c)}'" for c in clauses)
+
         # R1 — the highest declared priority governs, if it speaks
         # with one voice.
         top_priority = max(_priority(clause) for clause in parties)
@@ -272,14 +301,14 @@ class MoralityGate:
                 trace.append(
                     f"R2 (specificity): among the tied clauses, "
                     f"{narrow_ids} carry the narrowest scope "
-                    f"('{_scope(narrow[0])}') and agree on the "
+                    f"({scope_text(narrow)}) and agree on the "
                     f"directive '{winner_directive}'. The more "
                     "specific clause(s) govern the specific case."
                 )
             else:
                 trace.append(
                     f"R2 (specificity): {narrow_ids} remain tied — "
-                    f"equally specific scopes ('{_scope(narrow[0])}') "
+                    f"equally specific scopes ({scope_text(narrow)}) "
                     "with incompatible directives. R2 cannot resolve "
                     "the conflict."
                 )
@@ -301,6 +330,7 @@ class MoralityGate:
         # resolved conflict is recorded over all colliding parties; an
         # unresolved one over the finally tied set that R3 escalates.
         pool = parties if resolution is not None else decisive
+        decisive_ids = {c["id"] for c in decisive}
         conflicts: list[dict] = []
         for i, first in enumerate(pool):
             for second in pool[i + 1:]:
@@ -308,11 +338,18 @@ class MoralityGate:
                     continue
                 winner = None
                 if resolution is not None:
-                    winner = (
-                        first["id"]
-                        if _directive(first) == winner_directive
-                        else second["id"]
-                    )
+                    # Only a clause in the decisive set can be a
+                    # pair's winner (Linear whole-tree audit,
+                    # 2026-11-13): a pair of non-decisive clauses
+                    # decided nothing, and naming the directive-
+                    # matching one as winner misattributes the
+                    # governing clauses' win to it.
+                    for party in (first, second):
+                        if (
+                            party["id"] in decisive_ids
+                            and _directive(party) == winner_directive
+                        ):
+                            winner = party["id"]
                 conflicts.append(
                     {
                         "clauses": [first["id"], second["id"]],
@@ -349,7 +386,10 @@ class MoralityGate:
                     "the collision is unresolved (see the conflict "
                     "record). The step does not proceed."
                 )
-            elif directive == winner_directive:
+            elif (
+                directive == winner_directive
+                and clause["id"] in decisive_ids
+            ):
                 outcome = "prevails"
                 detail = (
                     f"Signal(s) {engaged_signals} engage this hard "
@@ -357,6 +397,19 @@ class MoralityGate:
                     f"collided with another engaged hard clause and "
                     f"prevailed under {resolution} (see the conflict "
                     "record)."
+                )
+            elif directive == winner_directive:
+                # Agrees with the outcome but did not govern (Linear
+                # whole-tree audit, 2026-11-13): recording this
+                # clause as "prevails" credited it with the decisive
+                # clauses' win.
+                outcome = "concurs_with_outcome"
+                detail = (
+                    f"Signal(s) {engaged_signals} engage this hard "
+                    f"clause, whose directive is '{directive}'. It "
+                    "agrees with the governing outcome but did not "
+                    f"govern: {sorted(decisive_ids)} governed under "
+                    f"{resolution} (see the conflict record)."
                 )
             else:
                 outcome = "overridden"

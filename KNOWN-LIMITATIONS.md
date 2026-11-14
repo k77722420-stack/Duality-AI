@@ -16,7 +16,7 @@ Each entry names the limitation, states plainly what it is, points to
 where it lives, and says what would retire it. This is a museum, not
 an apology: the exhibits are labeled, not lamented.
 
-> **Availability note:** the live-model layer (`src/duality_ai/live.py`), the experiment corpus and run data (`experiments/`), and `experiments/run_battery.py` are **not included in this public repository**. The results reported here are stated exactly as measured, and the corpus hash quoted in the results addendum lets anyone confirm the expectations were locked before the run — but the runs cannot be re-executed from this repository alone. Until the experiment files are published, treat these documents as a lab report, not a reproducible artifact.
+> **Availability note (corrected 2026-11-13):** an earlier version of this note said the live-model layer (`src/duality_ai/live.py`), the experiment corpus and run data (`experiments/`), and `experiments/run_battery.py` were **not included in this public repository**. That was true when it was written, and it stopped being true on November 13, 2026, when those files were published here. The results reported here are stated exactly as measured, and the corpus hash quoted in the results addendum lets anyone confirm the expectations were locked before the run — and the runs can now be re-executed from this repository.
 
 ---
 
@@ -186,23 +186,43 @@ cloud claim, the deferred sync phase: nodes, chain-head agreement
 under the Mirror Twin handshake, and conflict rules for copies that
 disagree.
 
-## 10. No real model is integrated anywhere
+## 10. No real model is integrated anywhere — RETIRED (2026-11-13)
 
-Nothing in this repository calls a language model. The hemispheres
-are deterministic stand-ins — keyword-level signal detection and a
-fixed menu of framings; the hub merges by a few explicit rules; the
-morality gate does keyword-level matching against the clause library.
-The five-stage flow runs end to end, and no stage in it reasons,
-generates, or understands. The skeletons demonstrate the shape of
-the architecture and its hand-offs — nothing more was ever claimed
-for them, and this entry exists so the claim stays exactly that
-size.
+This entry was true when it was written, and it is not true now.
+It is kept, marked retired, because the museum records what was
+believed and when it stopped being true — it does not quietly
+delete exhibits. (The drift was caught by Linear's whole-tree
+audit, 2026-11-13: the entry still stated the old fact in the
+present tense while the repository itself contradicted it.)
 
-**Where it lives:** `src/duality_ai/hemispheres.py`, `hub.py`,
-`morality.py`, `pipeline.py`; inventoried in THESIS-COMPLETE.md §6.
-**Retired by:** integrating a real base model at the base layer and
-re-implementing the stages against it — at which point several other
-exhibits in this museum would need to be rewritten, not removed.
+As written, the entry said: nothing in this repository calls a
+language model; the hemispheres are deterministic stand-ins —
+keyword-level signal detection and a fixed menu of framings; the
+hub merges by a few explicit rules; the morality gate does
+keyword-level matching against the clause library; and no stage
+reasons, generates, or understands.
+
+What retired it: `src/duality_ai/model.py` and
+`src/duality_ai/live.py`. The live pipeline runs the same five
+stages with a real language model staffing the hemispheres — a
+local Ollama server, or Gemini over HTTPS — judged by the same
+clause library, failing closed on a malformed reply. A real model
+first ran the pipeline on November 7, 2026; the measured results
+live in `docs/real-model-results.md`, and the live-era exhibits
+later in this file record what that integration surfaced.
+
+What remains true: the SKELETON pipeline — `pipeline.py` with
+`hemispheres.py` and `hub.py` — still runs deterministic
+stand-ins and calls no model, and the stand-ins demonstrate the
+architecture's shape and hand-offs, exactly as this entry
+originally said. The claim's error was its scope: "anywhere" in
+the repository.
+
+**Where it lives:** the retired claim lived in this entry; the
+integration lives in `src/duality_ai/live.py` and
+`src/duality_ai/model.py`.
+**Retired by:** the integration itself, November 7, 2026;
+recorded here November 13, 2026.
 
 ## 11. The neuroscience parallels are metaphors, not evidence
 

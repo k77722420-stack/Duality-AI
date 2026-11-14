@@ -117,7 +117,15 @@ class _FormatFailure(Exception):
 def _parse_json_object(raw: str, stage: str) -> dict:
     try:
         data = json.loads(raw)
-    except (json.JSONDecodeError, TypeError) as error:
+    except (ValueError, TypeError, RecursionError) as error:
+        # ValueError, not just its JSONDecodeError subclass: an
+        # oversized integer literal in a reply trips the interpreter's
+        # int-string conversion limit and raises a plain ValueError
+        # out of json.loads (Linear whole-tree audit, 2026-11-13;
+        # confirmed by execution — the exception escaped run() and no
+        # stopped trace was produced). RecursionError covers deeply
+        # nested replies on interpreters whose scanner recurses.
+        # Every parse failure is a format failure: fail closed.
         raise _FormatFailure(
             f"{stage} reply was not valid JSON: {error}"
         ) from error

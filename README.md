@@ -100,14 +100,20 @@ by the other two.
 ## The code
 
 Three structural skeletons — one per layer — plus the two policy files
-that hold the system's laws as readable data. The code demonstrates the
-architecture's bookkeeping: it does not learn, does not summarize with
-a model, performs no real security function, and connects to no
+that hold the system's laws as readable data. The skeletons demonstrate
+the architecture's bookkeeping: they do not learn, do not summarize
+with a model, perform no real security function, and connect to no
 network. Pure Python 3, standard library only.
 
 - `src/duality_ai/pipeline.py` (with `base.py`, `hemispheres.py`,
   `hub.py`, `morality.py`) — **Layer One**: the five-stage flow — base
   layer, logical hemisphere, creative hemisphere, hub, morality gate.
+- `src/duality_ai/live.py` (with `model.py`) — the **live pipeline**:
+  the same five-stage flow with a real language model staffing the
+  hemispheres (a local Ollama server, or Gemini over HTTPS), judged by
+  the same clause library. A malformed model reply fails closed and
+  nothing is released. Measured runs:
+  [docs/real-model-results.md](docs/real-model-results.md).
 - `src/duality_ai/barrier.py` — **Layer Two**: the sizing law and the
   stand-down rule. Replication is sized, never unlimited: surge =
   ⌈threat × (1 + margin)⌉, capped at a ceiling; after an attack, every
@@ -146,8 +152,9 @@ Cloud and extracts the leniency audit
 ([docs/leniency-audit-trail.md](docs/leniency-audit-trail.md)). The
 test suite verifies the skeletons' structural bookkeeping — the
 sizing arithmetic, the chain linking and tamper detection, the decay
-law and its exemption, the clause-conflict precedence, and the
-running demo's traces — and the full suite passes.
+law and its exemption, the clause-conflict precedence, the
+live pipeline's fail-closed seams, and the running demo's traces —
+and the full suite passes.
 
 ## Contributing
 
