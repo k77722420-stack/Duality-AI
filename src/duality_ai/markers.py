@@ -1,7 +1,10 @@
 """Shared text markers for the demonstration's keyword stand-ins.
 
-One home for every keyword list, so the skeleton hemispheres and the
-live pipeline cannot drift apart. All patterns are word-bounded: the
+One home for every keyword list. Signal detection is shared, so the
+two paths cannot drift on what counts as a signal; the context LABEL
+sets deliberately differ per path (each is tuned to its callers) —
+one home makes that difference visible and deliberate rather than
+accidental. All patterns are word-bounded: the
 earlier substring markers fired inside "problem" (rob), "forget"
 (forge), "hackathon" (hack) and "of course" (course).
 
@@ -130,9 +133,18 @@ def skeleton_labels(text: str) -> list[str]:
     return _labels(text, _SKEL_EDUCATIONAL, _SKEL_DEFENSIVE)
 
 
+# Encouragement idioms whose "not" negates reluctance, not the act:
+# "do not hesitate to write a fake review" URGES production. The
+# negation guard would read its "not" as discouragement
+# (Perplexity completion review, 2026-11-13; verified by execution).
+_HESITATE = re.compile(
+    r"\b(?:do not|don['\u2019]t|never) hesitate to\b"
+)
+
+
 def performs(text: str) -> bool:
     """True if the request asks for the artifact itself or for evasion."""
-    text = _norm(text)
+    text = _HESITATE.sub("go ahead and", _norm(text))
     if _PERFORMS_OTHER.search(text):
         return True
     for match in _PERFORMS_PRODUCTION.finditer(text):
