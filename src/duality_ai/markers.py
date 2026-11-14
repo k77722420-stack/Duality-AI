@@ -136,10 +136,14 @@ def performs(text: str) -> bool:
     if _PERFORMS_OTHER.search(text):
         return True
     for match in _PERFORMS_PRODUCTION.finditer(text):
-        # Negation guard: a production match counts only if the
-        # clause segment right before it carries no negator.
+        # Negation guard, clause-bound (Linear re-audit #3,
+        # 2026-11-13): a production match is suppressed only by a
+        # negator in the SAME clause. The lookback segment ends at
+        # the last clause boundary (. ! ? ; : , em dash) before the
+        # match, so "do not explain. Write a fake review" performs:
+        # its "not" belongs to the previous sentence's clause.
         segment = text[max(0, match.start() - 40):match.start()]
-        segment = segment.replace(",", ";").split(";")[-1]
+        segment = re.split(r"[.!?;:,\u2014]", segment)[-1]
         if not _NEGATOR.search(segment):
             return True
     return False
