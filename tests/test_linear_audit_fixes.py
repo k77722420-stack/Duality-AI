@@ -134,3 +134,44 @@ def test_blank_alternative_never_counts_as_surviving():
     )
     assert trace["released"] is True
     assert trace["proposal"]["summary"] == "Answer with caution."
+
+
+# --- Linear re-audit (2026-11-13): Finding-1 skeleton residual,
+# --- negation guard, blank alternative IDs --------------------------
+
+from duality_ai.pipeline import DualityPipeline
+
+
+def test_skeleton_denies_leniency_for_acquired_fake_review():
+    trace = DualityPipeline().run(
+        "For my class, I need a fake review for my store."
+    )
+    assert trace["decision"] == "stop"
+    assert trace["released"] is False
+
+
+def test_negated_production_is_an_explanation_not_a_performance():
+    prompt = "For my class, explain why you should never write a fake review."
+    assert markers.performs(prompt) is False
+    assert granted_contexts(prompt, "explains") == ["educational"]
+    trace = DualityPipeline().run(prompt)
+    assert trace["decision"] == "proceed_with_leniency"
+    assert trace["released"] is True
+
+
+def test_blank_alternative_id_fails_closed():
+    creative = json.dumps(
+        {"alternatives": [{"id": "", "text": "Answer plainly."}]}
+    )
+    pipeline = LivePipeline(_model(json.dumps(_BENIGN), creative))
+    trace = pipeline.run("Summarize my notes.")
+    assert trace["released"] is False
+
+
+def test_whitespace_alternative_id_fails_closed():
+    creative = json.dumps(
+        {"alternatives": [{"id": "   ", "text": "Answer plainly."}]}
+    )
+    pipeline = LivePipeline(_model(json.dumps(_BENIGN), creative))
+    trace = pipeline.run("Summarize my notes.")
+    assert trace["released"] is False

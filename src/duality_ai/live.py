@@ -183,11 +183,15 @@ def _validate_creative(data: dict) -> dict:
         if (
             not isinstance(alternative, dict)
             or not isinstance(alternative.get("id"), str)
+            or not alternative["id"].strip()
             or not isinstance(alternative.get("text"), str)
         ):
+            # TEC-8 tail (Linear re-audit, 2026-11-13): a blank or
+            # whitespace-only id slipped past the alt-direct
+            # rejection rule, which matches on the id.
             raise _FormatFailure(
-                "creative hemisphere alternative lacks an 'id' or "
-                "'text' string."
+                "creative hemisphere alternative lacks a non-blank "
+                "'id' or 'text' string."
             )
     if all(
         not alternative["text"].strip() for alternative in alternatives

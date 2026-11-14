@@ -58,24 +58,6 @@ _SKEL_DEFENSIVE = _compile(
     r"\bavoid being\b", r"\bstop thieves\b", r"\bstay safe\b",
 )
 
-_PERFORMS = _compile(
-    r"\bready[- ]to[- ](?:use|send|post)\b",
-    r"\bword for word\b",
-    r"\bexactly as\b",
-    r"\bcopy(?: it)? and (?:paste|post)\b",
-    r"\b(?:students?|they|people|others|readers) can "
-    r"(?:send|post|copy|submit|publish)\b",
-    r"\b(?:write|draft|compose|create|generate|produce|make|give|"
-    r"provide|supply|post|publish|submit)\b"
-    r"[^.?!;]{0,40}\b(?:fake|forged|fraudulent|bogus|phony)\b",
-    r"\b(?:forge|fabricate)\b",
-    # evasion: how to get away with it
-    r"\b(?:without|avoid(?:ing)?) (?:getting |being )?"
-    r"(?:caught|detected|noticed)\b",
-    r"\bso (?:that )?(?:no ?one|nobody) (?:notices|finds out)\b",
-)
-
-
 def _norm(text: str) -> str:
     """Lowercase; collapse every whitespace run to a single space.
 
@@ -85,6 +67,39 @@ def _norm(text: str) -> str:
     means every pattern in this module sees the same text.
     """
     return " ".join((text or "").lower().split())
+
+
+_PERFORMS_OTHER = _compile(
+    r"\bready[- ]to[- ](?:use|send|post)\b",
+    r"\bword for word\b",
+    r"\bexactly as\b",
+    r"\bcopy(?: it)? and (?:paste|post)\b",
+    r"\b(?:students?|they|people|others|readers) can "
+    r"(?:send|post|copy|submit|publish)\b",
+    # evasion: how to get away with it
+    r"\b(?:without|avoid(?:ing)?) (?:getting |being )?"
+    r"(?:caught|detected|noticed)\b",
+    r"\bso (?:that )?(?:no ?one|nobody) (?:notices|finds out)\b",
+)
+# Production of the flagged artifact. Subject to the negation guard
+# in performs(): "explain why you should never write a fake review"
+# discourages the act; it does not perform it (Linear re-audit,
+# 2026-11-13). The acquisition pattern covers "I need a fake review"
+# (Linear's Finding-1 example) without touching epistemic phrasings
+# like "want to understand how fake reviews work" (no article, no
+# acquisition verb adjacent to the artifact).
+_PERFORMS_PRODUCTION = _compile(
+    r"\b(?:write|draft|compose|create|generate|produce|make|give|"
+    r"provide|supply|post|publish|submit)\b"
+    r"[^.?!;]{0,40}\b(?:fake|forged|fraudulent|bogus|phony)\b",
+    r"\b(?:forge|fabricate)\b",
+    r"\b(?:need|want|get|buy|order)(?:\s+\w+){0,2}?\s+"
+    r"(?:(?:a|an|some)\s+)?(?:fake|forged|fraudulent|bogus|phony)\b",
+)
+_NEGATOR = _compile(
+    r"\bnever\b", r"\bnot\b", r"\bno (?:one|body) should\b",
+    r"\bdo not\b", r"\brefuse(?:s|d)? to\b", r"n['\u2019]t\b",
+)
 
 
 def detect_signals(text: str) -> list[str]:
@@ -117,4 +132,14 @@ def skeleton_labels(text: str) -> list[str]:
 
 def performs(text: str) -> bool:
     """True if the request asks for the artifact itself or for evasion."""
-    return bool(_PERFORMS.search(_norm(text)))
+    text = _norm(text)
+    if _PERFORMS_OTHER.search(text):
+        return True
+    for match in _PERFORMS_PRODUCTION.finditer(text):
+        # Negation guard: a production match counts only if the
+        # clause segment right before it carries no negator.
+        segment = text[max(0, match.start() - 40):match.start()]
+        segment = segment.replace(",", ";").split(";")[-1]
+        if not _NEGATOR.search(segment):
+            return True
+    return False

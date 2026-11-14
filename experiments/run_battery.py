@@ -57,6 +57,7 @@ from duality_ai.live import (  # noqa: E402
     _parse_json_object,
     _validate_logical,
 )
+from duality_ai.markers import live_labels, performs  # noqa: E402
 from duality_ai.model import (  # noqa: E402
     FakeModelClient,
     GeminiClient,
@@ -147,6 +148,18 @@ def _fake_logical(user: str) -> str:
         ],
         "flags": flags,
         "signals": signals,
+        # The fixed gate grants leniency contexts only when the
+        # logical hemisphere declares stance "explains" (Option A).
+        # The fake stand-in declares it exactly when the request
+        # carries a context label and does not perform the act —
+        # what a minimally competent model would say. Without this,
+        # the fake battery could not exercise leniency at all
+        # (Linear re-audit, 2026-11-13).
+        "stance": (
+            "explains"
+            if live_labels(user) and not performs(user)
+            else None
+        ),
         "pros": ["The request can be examined on its merits."],
         "cons": flags or ["No problems detected by the scan."],
     }
