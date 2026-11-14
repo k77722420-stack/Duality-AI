@@ -298,6 +298,11 @@ class JsonFileStore(MemoryStore):
 # ---------------------------------------------------------------------------
 
 
+
+class ChainIntegrityError(RuntimeError):
+    """Maintenance refused to re-seal a provenance chain that does
+    not verify (see MemoryCloud._require_verified_chain)."""
+
 class MemoryCloud:
     """Layer Three's core: remember, recall, consolidate, forget.
 
@@ -365,6 +370,26 @@ class MemoryCloud:
                 return False
             prev = record.record_hash
         return True
+
+    def _require_verified_chain(self, action: str) -> None:
+        """Refuse to let maintenance launder a broken chain.
+
+        Perplexity finding (full audit, 2026-11-13; verified by
+        execution): an unauthorized edit left verify_chain() False —
+        detectable — until ordinary maintenance pruned an old record
+        and re-sealed the chain over the forged content, after which
+        the tampering verified as genuine. Maintenance therefore
+        checks the chain BEFORE it changes anything: a chain that
+        does not verify is evidence, and evidence is not re-sealed
+        away. The full storage redesign remains TEC-6; this guard is
+        the interim integrity rule.
+        """
+        if not self.verify_chain():
+            raise ChainIntegrityError(
+                f"{action} refused: the provenance chain does not "
+                "verify. Maintenance will not re-seal over a possible "
+                "tampering; the records are unchanged."
+            )
 
     def _reseal_chain(self) -> None:
         """Re-link the chain in insertion order after a system act.
@@ -494,6 +519,7 @@ class MemoryCloud:
         cluster is ripe, where its distillation lives, and that each
         episode is distilled at most once.
         """
+        self._require_verified_chain("Consolidation")
         stamp = _as_iso(created_at)
         episodes = self.store.find(kind="episodic")
         pending: dict[str, list[MemoryRecord]] = {}
@@ -575,6 +601,7 @@ class MemoryCloud:
         clauses are never forgettable. Returns the count pruned. The
         chain is re-sealed over the survivors.
         """
+        self._require_verified_chain("Pruning")
         moment = _parse_iso(_as_iso(now))
         pruned = 0
         for record in self.store.all():

@@ -159,12 +159,18 @@ class MoralityGate:
                     }
                 )
                 continue
-            cover = None
+            # Leniency must cover EVERY signal this clause is
+            # engaged by (Perplexity finding, full audit 2026-11-13,
+            # verified by execution): the previous first-hit rule
+            # waived the whole clause when a single engaged signal
+            # was covered, silently releasing the uncovered rest.
+            covers = {}
             for signal in engaged:
-                cover = self._leniency_cover(signal, contexts)
-                if cover is not None:
-                    break
-            if cover is not None:
+                found = self._leniency_cover(signal, contexts)
+                if found is not None:
+                    covers[signal] = found
+            if len(covers) == len(engaged):
+                cover = next(iter(covers.values()))
                 leniency_applied = True
                 reasons.append(
                     {
@@ -181,15 +187,26 @@ class MoralityGate:
                 )
             else:
                 blocked = True
+                uncovered = [sig for sig in engaged if sig not in covers]
+                if covers:
+                    # Partial coverage: previously this proceeded.
+                    detail = (
+                        f"Signal(s) {engaged} engage this hard clause. "
+                        f"Leniency covers {sorted(covers)} but not "
+                        f"{uncovered}; leniency must cover every "
+                        "engaged signal. The step is stopped."
+                    )
+                else:
+                    detail = (
+                        f"Signal(s) {engaged} engage this hard clause "
+                        "and no leniency condition covers them. The "
+                        "step is stopped."
+                    )
                 reasons.append(
                     {
                         "clause": clause["id"],
                         "outcome": "blocks",
-                        "detail": (
-                            f"Signal(s) {engaged} engage this hard clause "
-                            "and no leniency condition covers them. The "
-                            "step is stopped."
-                        ),
+                        "detail": detail,
                     }
                 )
 

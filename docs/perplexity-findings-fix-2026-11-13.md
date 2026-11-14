@@ -1,0 +1,9 @@
+# Perplexity Findings — Verification & Fix Record (Lux, 2026-11-13)
+
+**Source:** Perplexity's external review of this branch (from an incomplete pasted package — it never received markers.py, yet both of its substantive findings were real). Ken's decision: full audit first, merge after. Both findings were verified BY EXECUTION on the pre-fix tree before any fix was written.
+
+**Finding A — gate leniency scope. CONFIRMED.** morality.py's legacy path broke out of the per-clause cover loop on the FIRST covered signal: a (configurable) hard clause engaged by [wrongdoing, deception] with a leniency clause covering only deception returned proceed_with_leniency. Default shipped clauses carry one signal each and cannot trigger it; the logic was wrong for any multi-signal clause. **Fix:** leniency applies only when EVERY engaged signal of the clause is covered; partial coverage blocks, and the reason names the uncovered signals. (The conflict path never consults leniency — its R4 — and was checked, not changed.) Shipped-library golden regression texts preserved for the zero-coverage case.
+
+**Finding B — maintenance reseal launders tampering. CONFIRMED.** Repro: forge a record's content → verify_chain() False (detectable) → decay_and_prune() prunes one old record → _reseal_chain() rewrites hashes over the forged content → verify_chain() True. **Fix (interim guard; the TEC-6 redesign stays on schedule):** consolidate() and decay_and_prune() call _require_verified_chain() before changing anything; a chain that does not verify raises ChainIntegrityError and the records are left untouched — evidence is not re-sealed away.
+
+**Tests:** tests/test_perplexity_findings.py (5 tests): partial-cover blocks; full-cover still lenient; prune and consolidate both refuse on a broken chain with records untouched; healthy chain still prunes and verifies. Full suite after fixes: **125 passed**. Fresh-checkout evidence follows in the verification doc, as before.
