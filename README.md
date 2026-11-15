@@ -1,5 +1,7 @@
 # The Duality AI — Three Layers, One Running Mind
 
+> **What this is — please read first:** The Duality AI is a **theoretical architecture**: a design proposal and research prototype. It is **not** a deployed or working AI product, and it does not claim to be one. It is an experiment in how a governed AI *could* be structured — reasoning, oversight, security, and memory under explicit rules — published openly so the ideas can be examined, tested, and argued with.
+
 An original architecture concept by **Kenneth Lee Blum Jr** (November 7,
 2026), released under the [MIT License](LICENSE) with contributions
 welcomed. The Duality AI is an AI built in three layers, each supplying
