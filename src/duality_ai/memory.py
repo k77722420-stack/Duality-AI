@@ -111,6 +111,18 @@ def _parse_iso(value: str) -> datetime:
     return moment
 
 
+def _copy_record(record: "MemoryRecord") -> "MemoryRecord":
+    """An independent copy of a record.
+
+    Every field but ``tags`` is an immutable scalar (str / float),
+    so a dataclass copy carrying a fresh tags list shares nothing
+    mutable with the original: in-place edits to one can never be
+    observed through the other. Used for the file store's
+    committed snapshot (see ``JsonFileStore._publish_committed``).
+    """
+    return replace(record, tags=list(record.tags))
+
+
 # ---------------------------------------------------------------------------
 # The record
 # ---------------------------------------------------------------------------
@@ -274,21 +286,23 @@ class JsonFileStore(MemoryStore):
       commit or a plain append — rolls the working copy back to the
       file's contents and removes the abandoned temp file, so an
       uncommitted record never lingers as a phantom.
-    * Reads are transaction-isolated (Linear re-audit fix, Nov 21,
-      2026): while a batch is open, reads (``get``/``all``/``find``)
-      from any thread OTHER than the batch's owner serve the last
-      COMMITTED snapshot, never the batch's uncommitted working
-      copy; the owner still reads its own working copy. A commit
-      publishes the new state in one step; an abort means the
-      uncommitted records never existed for any reader.
+    * Reads are transaction-isolated and publish-on-save (Linear
+      re-audit + third-look fixes, Nov 21, 2026): reads
+      (``get``/``all``/``find``) serve the last COMMITTED snapshot,
+      which is deep-copied at publish time so it shares no mutable
+      state with the working copy, and a mutation becomes visible
+      to other readers only once its save has landed. While a
+      batch is open, the batch's owner alone reads its own working
+      copy; a commit publishes the new state in one step; an abort
+      — or a failed save — publishes nothing, so uncommitted
+      records never exist for any other reader.
 
-    Outside a batch, reads serve the working copy, which outside a
-    batch IS the committed state (every mutation saves at once or
-    rolls back). The file is re-read at construction, before every
-    mutation, and at the start of every batch. The discipline's
-    limit is the brief's own: it protects against accidents and
-    overlapping instances on one machine; it is not a multi-user
-    database.
+    The file is re-read at construction, before every mutation,
+    and at the start of every batch; the committed snapshot is
+    re-published at every successful save and every reload, and
+    at no other time. The discipline's limit is the brief's own:
+    it protects against accidents and overlapping instances on
+    one machine; it is not a multi-user database.
     """
 
     def __init__(self, path: str | Path) -> None:
@@ -304,9 +318,10 @@ class JsonFileStore(MemoryStore):
                 data = json.load(handle)
             self._records = [MemoryRecord.from_dict(d) for d in data]
         # The last committed state: what the file held at the last
-        # successful save (or load). While a batch is open, non-owner
-        # reads serve this snapshot, never the working copy.
-        self._committed: list[MemoryRecord] = list(self._records)
+        # successful save (or load). Reads serve this snapshot,
+        # never the working copy (see _readable).
+        self._committed: list[MemoryRecord] = []
+        self._publish_committed()
 
     # -- the Option A machinery --------------------------------------
 
@@ -344,6 +359,24 @@ class JsonFileStore(MemoryStore):
                     fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
                 handle.close()
 
+    def _publish_committed(self) -> None:
+        """Snapshot the working copy as the committed state.
+
+        The snapshot holds INDEPENDENT copies of the records —
+        fresh objects with fresh tags lists (Linear third look,
+        Nov 21, 2026). The first version copied only the list, so
+        the snapshot and the working copy shared the record
+        objects themselves: an in-place edit to a working record
+        (a consolidation tag append, mid-batch) showed through
+        the snapshot to other readers before it committed — and
+        the record's seal broke in their view while the edit
+        stood, healing only when the batch rolled back. Published
+        at exactly two moments: a successful save, and a reload
+        (where the working copy becomes the file's contents, which
+        is the committed state by definition).
+        """
+        self._committed = [_copy_record(r) for r in self._records]
+
     def _reload_locked(self) -> None:
         """Replace the working copy with the file's current contents.
 
@@ -359,7 +392,7 @@ class JsonFileStore(MemoryStore):
             self._records = []
         # A reload makes the working copy the file's contents —
         # which is by definition the committed state.
-        self._committed = list(self._records)
+        self._publish_committed()
 
     def _save_locked(self) -> None:
         """Write the working copy in one atomic rename. Lock held.
@@ -382,8 +415,9 @@ class JsonFileStore(MemoryStore):
                 )
             os.replace(tmp, self.path)
             # The rename landed: the working copy IS the committed
-            # state now, published to non-owner readers in one step.
-            self._committed = list(self._records)
+            # state now, published to other readers in one step —
+            # and not before (see _readable).
+            self._publish_committed()
         except BaseException:
             with contextlib.suppress(OSError):
                 tmp.unlink()
@@ -469,7 +503,14 @@ class JsonFileStore(MemoryStore):
             return
         with self._locked():
             self._reload_locked()
-            fresh = self.get(record.id)
+            # The lookup must hit the WORKING copy, not the
+            # readable view: reads serve the committed snapshot,
+            # whose records are independent copies — an edit
+            # applied there would never reach the save below,
+            # which serializes the working copy.
+            fresh = next(
+                (r for r in self._records if r.id == record.id), None
+            )
             if fresh is not None and fresh is not record:
                 for f in fields(record):
                     if f.name != "id":
@@ -503,16 +544,23 @@ class JsonFileStore(MemoryStore):
     def _readable(self) -> list[MemoryRecord]:
         """The records a read from THIS thread may serve.
 
-        Transaction isolation (Linear re-audit fix, Nov 21, 2026):
-        while a batch owned by another thread is open, the working
-        copy holds that batch's uncommitted state, so other threads
-        read the last committed snapshot instead. The batch's owner
-        — and every reader when no batch is open — reads the working
-        copy, which outside a batch is the committed state.
+        Publish-on-save (Linear re-audit + third-look fixes,
+        Nov 21, 2026): reads serve the last COMMITTED snapshot,
+        never the working copy, so a mutation becomes visible to
+        other readers only once its save has landed — an append
+        blocked mid-save, a removal whose save then fails, an
+        in-place edit a batch later rolls back: none of it is
+        observable, because the snapshot is published only by a
+        successful save (or a reload) and holds independent
+        copies of the records, not the working objects. The one
+        exception is a batch's owner: while its batch is open it
+        reads its own working copy, uncommitted state included
+        (the round-2 isolation, kept). A commit publishes the new
+        state in one step; an abort publishes nothing.
         """
-        if self._batching and self._batch_owner != threading.get_ident():
-            return list(self._committed)
-        return list(self._records)
+        if self._batching and self._batch_owner == threading.get_ident():
+            return list(self._records)
+        return list(self._committed)
 
     def get(self, record_id: str) -> MemoryRecord | None:
         for record in self._readable():
@@ -638,34 +686,40 @@ class MemoryCloud:
             prev = record.record_hash
         return True
 
-    def _verified_record_seals(self) -> set[tuple[str, str]]:
-        """The (id, record_hash) seals of records that verify.
+    def _verified_records(self) -> list[MemoryRecord]:
+        """The records that verify, each judged in place.
 
         The same two checks verify_chain() makes — each record's
-        prev_hash equals the previous record's hash (genesis for the
-        first) and each record_hash equals the hash of its own
+        prev_hash equals the previous record's hash (genesis for
+        the first) and each record_hash equals the hash of its own
         current contents — evaluated per record over the store's
-        insertion order, so a caller can exclude exactly the records
-        that fail instead of trusting or rejecting the whole shelf.
+        insertion order, so a caller can exclude exactly the
+        records that fail instead of trusting or rejecting the
+        whole shelf. The verdict attaches to the record OBJECT
+        that was judged: the admitted records themselves are
+        returned, never a detached key a caller matches against.
 
-        The result is keyed by the record's own seal, NOT by its id
-        alone (Linear re-audit fix, Nov 21, 2026): the first version
-        of this filter collected verified IDs and admitted any
-        record carrying one, so a corrupted record that REUSED an
-        honest record's id was recalled as genuine — its own seal
-        was never checked. Two records sharing an id are now judged
-        independently: each is admitted only under its own
-        (id, record_hash) pair, and a pair verifies only when the
-        record standing under it recomputes to that very hash.
+        Two earlier versions detached the verdict (Linear re-audit
+        and third look, Nov 21, 2026). The first collected verified
+        IDs and admitted any record carrying one; the second
+        collected (id, record_hash) seals and admitted any record
+        PRESENTING a verified pair. Both fall to the same twin: a
+        corrupted record that copies an honest record's id — or
+        its id AND its stored hash, changing only the content —
+        presents a key another record earned, and is admitted even
+        though its own hash does not recompute over its altered
+        content. Judged in place, the twin fails on its own
+        contents no matter what it copied; the honest record
+        beside it still verifies and is served.
         """
-        verified: set[tuple[str, str]] = set()
+        verified: list[MemoryRecord] = []
         prev = GENESIS_HASH
         for record in self.store.all():
             if (
                 record.prev_hash == prev
                 and record.record_hash == record.compute_hash()
             ):
-                verified.add((record.id, record.record_hash))
+                verified.append(record)
             prev = record.record_hash
         return verified
 
@@ -785,21 +839,28 @@ class MemoryCloud:
         ``last_recall_exclusions`` rather than the exclusion being
         hidden. Maintenance already refused to re-seal over such a
         record; recall now refuses to serve it as the past. The
-        check is per record, under the record's own seal: a
-        corrupted record that reuses an honest record's id fails
-        its own hash check and is excluded — and surfaced — even
-        though its honest twin is served (Linear re-audit fix).
+        check is per record, judged in place on the record itself:
+        a corrupted record that copies an honest record's id — or
+        its id AND its stored hash — fails its own recompute and
+        is excluded, and surfaced, even though its honest twin is
+        served (Linear re-audit and third-look fixes).
         """
         moment = _parse_iso(_as_iso(now))
         found = self.store.find(kind=kind, owner=owner, tag=tag)
         if text is not None:
             needle = text.lower()
             found = [r for r in found if needle in r.content.lower()]
-        verified = self._verified_record_seals()
+        # Admission is by object identity: _verified_records()
+        # returns the very objects it judged, and the store's
+        # find/all hand out those same objects, so identity is
+        # exactly the attachment the detached-key versions lacked.
+        # (MemoryRecord is an unhashable dataclass, so the objects
+        # themselves cannot ride in a set; their id()s can.)
+        verified = {id(r) for r in self._verified_records()}
         self.last_recall_exclusions = [
-            r.id for r in found if (r.id, r.record_hash) not in verified
+            r.id for r in found if id(r) not in verified
         ]
-        found = [r for r in found if (r.id, r.record_hash) in verified]
+        found = [r for r in found if id(r) in verified]
         # tags are copied explicitly: dataclasses.replace is shallow,
         # so without the copy a recalled record would share its tags
         # list with the stored record, and a caller's append would

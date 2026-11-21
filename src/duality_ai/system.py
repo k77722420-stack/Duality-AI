@@ -95,6 +95,15 @@ _RELEASED = ("proceed", "proceed_with_leniency")
 #         another episode.
 #       - any other record embeds ``excerpt``: at most the first
 #         _RECALL_EXCERPT_CHARS characters of its content.
+#   * EVERY string in an embedded entry is capped at
+#     _RECALL_EXCERPT_CHARS — the reference fields and the gate
+#     ``decision`` included, not only the excerpt. The bound is
+#     unconditional (Linear third look, Nov 21, 2026): an imported
+#     record's fields are whatever the import carried, and a
+#     200,000-character ``decision`` value previously rode through
+#     the episode branch whole, producing a ~202 KB episode from
+#     one recalled record. A non-string decision is embedded as
+#     its JSON serialization, capped the same way.
 #   * The recalled section of an episode is therefore bounded by
 #     a constant independent of the store's history, and episode
 #     size stays roughly flat across runs.
@@ -108,6 +117,19 @@ _RECALL_EMBED_LIMIT = 5
 _RECALL_EXCERPT_CHARS = 200
 
 
+def _cap_embedded(value):
+    """Cap one embedded string at the excerpt bound.
+
+    Non-strings pass through untouched (the reference fields are
+    system-shaped in practice); every string is truncated to
+    ``_RECALL_EXCERPT_CHARS`` so the per-entry bound holds no
+    matter what an imported record carries.
+    """
+    if isinstance(value, str):
+        return value[:_RECALL_EXCERPT_CHARS]
+    return value
+
+
 def _recalled_evidence(entry: dict) -> dict:
     """One recalled record's bounded embedding in an episode.
 
@@ -115,13 +137,15 @@ def _recalled_evidence(entry: dict) -> dict:
     it. The result follows the contract stated at
     ``_RECALL_EMBED_LIMIT``: reference fields always; a recalled
     episode contributes only its decision; any other record
-    contributes a capped excerpt of its content.
+    contributes a capped excerpt of its content. Every embedded
+    string — reference fields and decision included — is capped
+    at the same bound (see the contract).
     """
     evidence = {
-        "id": entry["id"],
-        "kind": entry["kind"],
-        "owner": entry["owner"],
-        "source": entry["source"],
+        "id": _cap_embedded(entry["id"]),
+        "kind": _cap_embedded(entry["kind"]),
+        "owner": _cap_embedded(entry["owner"]),
+        "source": _cap_embedded(entry["source"]),
     }
     parsed = None
     try:
@@ -129,7 +153,13 @@ def _recalled_evidence(entry: dict) -> dict:
     except (ValueError, TypeError, RecursionError):
         parsed = None
     if isinstance(parsed, dict) and "prompt" in parsed and "decision" in parsed:
-        evidence["decision"] = parsed["decision"]
+        decision = parsed["decision"]
+        if not isinstance(decision, str):
+            try:
+                decision = json.dumps(decision, sort_keys=True)
+            except (TypeError, ValueError, RecursionError):
+                decision = str(decision)
+        evidence["decision"] = decision[:_RECALL_EXCERPT_CHARS]
     else:
         evidence["excerpt"] = entry["content"][:_RECALL_EXCERPT_CHARS]
     return evidence
@@ -152,12 +182,16 @@ class _UninspectableContentError(Exception):
 # bounded only the string-descent branch, so plain dict/list
 # nesting recursed until the interpreter raised RecursionError
 # (Linear re-audit, Nov 21, 2026); the walk is now iterative and
-# the budget applies on every branch.
+# the budget applies on every branch. There is deliberately NO
+# separate cap on string decodings (Linear third look, Nov 21,
+# 2026): an earlier version stopped decoding strings after four
+# levels and silently judged the still-encoded remainder as plain
+# text — a decoding floor a flagged phrase could hide beneath.
+# Decodings now count against the one depth budget, and a string
+# that still parses as JSON when the budget runs out is
+# UNINSPECTABLE, never clean.
 _MAX_INSPECT_DEPTH = 100
 _MAX_INSPECT_NODES = 50_000
-# A string that itself parses as JSON is decoded and walked at
-# most this many levels down (the pre-existing bound, kept).
-_MAX_NESTED_JSON_DEPTH = 4
 
 
 def _content_texts(value):
@@ -166,19 +200,29 @@ def _content_texts(value):
     Object KEYS are yielded alongside values (Linear re-audit fix,
     Nov 21, 2026): the first walk visited values only, so a flagged
     phrase sitting in a key — ``{"fake review": "ordinary note"}``
-    — was never judged at all. A string that itself parses as a
-    JSON object or array is walked too: an episode payload embeds
-    earlier records' serialized content in its recall summary, and
-    the door must judge that text with its escapes decoded as well.
+    — was never judged at all. A string that itself parses as JSON
+    is decoded and walked too, at any level — a top-level string
+    value gets exactly the treatment a nested one does (Linear
+    third look): an episode payload embeds earlier records'
+    serialized content in its recall summary, and a flagged phrase
+    can hide behind escapes the detector's whitespace
+    normalization cannot see until the string is decoded.
 
-    Raises ``_UninspectableContentError`` when the value exceeds
-    the inspection budget — the caller must not pass such content
-    as judged-clean.
+    Decoding continues until a string no longer parses as JSON —
+    there is no decoding floor. A string that fails to parse is
+    plain text, fully inspected as yielded. But anything the walk
+    cannot FULLY inspect raises ``_UninspectableContentError``:
+    a value that exceeds the inspection budget, a string that
+    still parses as JSON when the budget runs out, or a string
+    the parser itself cannot open (a RecursionError on
+    pathological nesting is converted, never swallowed into
+    "plain text"). The governing principle: anything not fully
+    inspected is refused, never silently passed.
     """
-    stack = [(value, 0, 0)]
+    stack = [(value, 0)]
     nodes = 0
     while stack:
-        item, depth, json_depth = stack.pop()
+        item, depth = stack.pop()
         nodes += 1
         if nodes > _MAX_INSPECT_NODES or depth > _MAX_INSPECT_DEPTH:
             raise _UninspectableContentError(
@@ -188,20 +232,29 @@ def _content_texts(value):
             )
         if isinstance(item, str):
             yield item
-            if json_depth < _MAX_NESTED_JSON_DEPTH:
-                try:
-                    nested = json.loads(item)
-                except (ValueError, RecursionError):
-                    continue
-                if isinstance(nested, (dict, list)):
-                    stack.append((nested, depth + 1, json_depth + 1))
+            try:
+                nested = json.loads(item)
+            except ValueError:
+                continue  # plain text: fully inspected as yielded
+            except RecursionError as error:
+                raise _UninspectableContentError(
+                    "a nested string defeats the JSON parser itself"
+                ) from error
+            if isinstance(nested, (dict, list, str)):
+                if depth + 1 > _MAX_INSPECT_DEPTH:
+                    raise _UninspectableContentError(
+                        "encoded strings nest past the inspection "
+                        f"budget (depth > {_MAX_INSPECT_DEPTH}) "
+                        "with undecoded JSON remaining"
+                    )
+                stack.append((nested, depth + 1))
         elif isinstance(item, dict):
             for key, item_value in item.items():
-                stack.append((key, depth + 1, json_depth))
-                stack.append((item_value, depth + 1, json_depth))
+                stack.append((key, depth + 1))
+                stack.append((item_value, depth + 1))
         elif isinstance(item, list):
             for item_value in item:
-                stack.append((item_value, depth + 1, json_depth))
+                stack.append((item_value, depth + 1))
 
 
 def _judged_signals(content: str) -> list[str]:
@@ -215,17 +268,21 @@ def _judged_signals(content: str) -> list[str]:
     phrase split by a newline in the prompt was detected and
     stopped by the pipeline, then judged "proceed" at the door
     because the stored form hid the phrase. For JSON content,
-    detection therefore runs over its string values — escapes
-    decoded by the parse — and the
-    signals are the union over those strings — object keys
-    included. Non-JSON content is judged as the raw text it is.
+    detection therefore runs over its decoded strings — the union
+    over every string the walk yields, object keys included, at
+    every level: a value that parses as a plain string is walked
+    like any other value, NOT scanned in its raw serialized form
+    (Linear third look: a top-level JSON string previously kept
+    its escapes undecoded and a flagged phrase inside it passed
+    unseen). Non-JSON content is judged as the raw text it is.
     The door's POLICY is unchanged: what the detector flags in a
     step's text is flagged at the door.
 
-    Content too deep or too wide to inspect within the budget
+    Content the walk cannot fully inspect within the budget
     raises ``_UninspectableContentError`` instead of passing
     unjudged (or crashing on the parser's recursion limit): the
-    door fails closed on what it cannot see.
+    door fails closed on what it cannot see — anything not fully
+    inspected is refused, never silently passed.
     """
     try:
         parsed = json.loads(content)
@@ -235,8 +292,6 @@ def _judged_signals(content: str) -> list[str]:
         raise _UninspectableContentError(
             "content nesting defeats the JSON parser itself"
         ) from error
-    if not isinstance(parsed, (dict, list)):
-        return detect_signals(content)
     signals: set[str] = set()
     for text in _content_texts(parsed):
         signals.update(detect_signals(text))
