@@ -59,14 +59,21 @@ total recall by design: a forgotten record is gone, link and all.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
+import threading
 import uuid
 from abc import ABC, abstractmethod
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import asdict, dataclass, field, fields, replace
 from datetime import datetime, timezone
 from pathlib import Path
+
+try:  # POSIX file locking for the Option A storage discipline.
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX platforms
+    fcntl = None  # type: ignore[assignment]
 
 _DEFAULT_POLICY_PATH = (
     Path(__file__).resolve().parents[2] / "config" / "memory_policy.json"
@@ -237,19 +244,105 @@ class JsonFileStore(MemoryStore):
     same directory followed by a rename, so a crash mid-write leaves
     the previous file intact. Records are dicts on disk, MemoryRecords
     in memory; the file can be read, debated, and backed up as data.
+
+    Concurrency discipline — the author's storage decision (Ken,
+    Nov 13, 2026; docs/storage-decision-brief-2026-11-12.md, Option A;
+    implemented Nov 21, 2026):
+
+    * A file lock (a ``<name>.lock`` file beside the store, flock
+      where the platform offers it) is held across every
+      reload–modify–save, so two instances — or two processes — cannot
+      interleave a save.
+    * Every mutation outside a batch first RELOADS the file and
+      re-applies its change to the fresh contents, so a stale
+      in-memory snapshot never overwrites records another instance
+      wrote (TEC-5). An appended record whose chain link no longer
+      matches the reloaded head is re-linked to that head before it
+      lands, so cross-instance appends keep the provenance chain
+      valid.
+    * Each save writes a UNIQUE temporary file (``<name>.tmp-<uuid>``)
+      and renames it over the store, so simultaneous saves cannot
+      collide on a shared temp name.
+    * Maintenance batches (``batch()``) reload once, let the core
+      compute the full changed state in memory, and commit it in ONE
+      atomic save (TEC-6): an interruption mid-maintenance leaves the
+      old, still-valid file untouched.
+
+    Reads (``get``/``all``/``find``) serve the working copy; the file
+    is re-read at construction, before every mutation, and at the
+    start of every batch. The discipline's limit is the brief's own:
+    it protects against accidents and overlapping instances on one
+    machine; it is not a multi-user database.
     """
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         self._records: list[MemoryRecord] = []
+        self._lock_depth = 0
+        self._lock_handle = None
+        self._thread_lock = threading.RLock()
+        self._batching = False
         if self.path.exists():
             with self.path.open(encoding="utf-8") as handle:
                 data = json.load(handle)
             self._records = [MemoryRecord.from_dict(d) for d in data]
 
-    def _save(self) -> None:
+    # -- the Option A machinery --------------------------------------
+
+    @contextlib.contextmanager
+    def _locked(self):
+        """Hold the store's file lock (re-entrant within an instance).
+
+        The outermost hold opens ``<name>.lock`` and flocks it, so a
+        second JsonFileStore over the same path — in this process or
+        another — waits until the reload–modify–save in progress has
+        finished. Nested holds within one instance just count.
+        """
+        with self._thread_lock:
+            if self._lock_depth:
+                self._lock_depth += 1
+                try:
+                    yield
+                finally:
+                    self._lock_depth -= 1
+                return
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            handle = (
+                self.path.parent / (self.path.name + ".lock")
+            ).open("a+")
+            self._lock_handle = handle
+            if fcntl is not None:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            self._lock_depth = 1
+            try:
+                yield
+            finally:
+                self._lock_depth = 0
+                self._lock_handle = None
+                if fcntl is not None:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                handle.close()
+
+    def _reload_locked(self) -> None:
+        """Replace the working copy with the file's current contents.
+
+        The caller must hold the lock. Objects handed out earlier are
+        not updated: after a reload, previously returned records are
+        stale copies, exactly as after a fresh construction.
+        """
+        if self.path.exists():
+            with self.path.open(encoding="utf-8") as handle:
+                data = json.load(handle)
+            self._records = [MemoryRecord.from_dict(d) for d in data]
+        else:
+            self._records = []
+
+    def _save_locked(self) -> None:
+        """Write the working copy in one atomic rename. Lock held."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix(self.path.suffix + ".tmp")
+        tmp = self.path.with_name(
+            f"{self.path.name}.tmp-{uuid.uuid4().hex}"
+        )
         with tmp.open("w", encoding="utf-8") as handle:
             json.dump(
                 [r.to_dict() for r in self._records],
@@ -259,18 +352,89 @@ class JsonFileStore(MemoryStore):
             )
         os.replace(tmp, self.path)
 
+    def _save(self) -> None:
+        """Save now — unless a batch is deferring the commit."""
+        if self._batching:
+            return
+        with self._locked():
+            self._save_locked()
+
+    def _relink_locked(self, record: MemoryRecord) -> None:
+        """Re-link an appended record to the reloaded chain head.
+
+        The core chained the record to the head IT saw; if another
+        instance has since extended the chain, the append is
+        re-applied to the longer chain (the storage brief's
+        reload–re-apply rule) so the chain still verifies.
+        """
+        head = (
+            self._records[-1].record_hash
+            if self._records
+            else GENESIS_HASH
+        )
+        if record.prev_hash != head:
+            record.prev_hash = head
+            record.record_hash = record.compute_hash()
+
+    @contextlib.contextmanager
+    def batch(self):
+        """A maintenance batch: compute in memory, commit once.
+
+        On entry the store reloads under the lock, so the core
+        computes over the file's true current contents. Saves are
+        deferred while the batch runs; on clean exit the whole
+        working copy is committed in ONE atomic save (TEC-6). If the
+        body raises, the uncommitted in-memory work is discarded by
+        reloading, and the file keeps its previous, still-valid
+        contents. A batch nested inside a batch simply joins the
+        outer one.
+        """
+        if self._batching:
+            yield
+            return
+        with self._locked():
+            self._reload_locked()
+            self._batching = True
+            try:
+                yield
+            except BaseException:
+                self._reload_locked()  # discard the uncommitted work
+                raise
+            else:
+                self._save_locked()
+            finally:
+                self._batching = False
+
     def _persist_mutation(self, record: MemoryRecord) -> None:
         """Re-save after an in-place change to a stored record.
 
         Consolidation marks episodes by editing their tags; for the
         file backend that edit must reach disk. Other backends may not
         need this hook — the core calls it only when the store has it.
+
+        Under a maintenance batch the record IS the working copy and
+        the batch's single commit carries the edit, so there is
+        nothing to do. Outside a batch, the edit is re-applied to the
+        freshly reloaded record with the same id, under the lock.
         """
-        self._save()
+        if self._batching:
+            return
+        with self._locked():
+            self._reload_locked()
+            fresh = self.get(record.id)
+            if fresh is not None and fresh is not record:
+                for f in fields(record):
+                    if f.name != "id":
+                        setattr(fresh, f.name, getattr(record, f.name))
+            self._save_locked()
 
     def put(self, record: MemoryRecord) -> None:
-        self._records.append(record)
-        self._save()
+        with self._locked():
+            if not self._batching:
+                self._reload_locked()
+            self._relink_locked(record)
+            self._records.append(record)
+            self._save()
 
     def get(self, record_id: str) -> MemoryRecord | None:
         for record in self._records:
@@ -285,12 +449,17 @@ class JsonFileStore(MemoryStore):
         return [r for r in self._records if _matches(r, kind, owner, tag)]
 
     def remove(self, record_id: str) -> bool:
-        before = len(self._records)
-        self._records = [r for r in self._records if r.id != record_id]
-        if len(self._records) == before:
-            return False
-        self._save()
-        return True
+        with self._locked():
+            if not self._batching:
+                self._reload_locked()
+            before = len(self._records)
+            self._records = [
+                r for r in self._records if r.id != record_id
+            ]
+            if len(self._records) == before:
+                return False
+            self._save()
+            return True
 
 
 # ---------------------------------------------------------------------------
@@ -346,6 +515,16 @@ class MemoryCloud:
         """Register (or clear, with None) the guarded-write hook."""
         self.write_hook = hook
 
+    def _store_batch(self):
+        """The store's maintenance batch, when it offers one.
+
+        JsonFileStore implements the Option A batch (reload once,
+        compute in memory, one atomic commit — TEC-6). Stores without
+        one (InMemoryStore) need no batching: a plain null context.
+        """
+        batch = getattr(self.store, "batch", None)
+        return batch() if batch is not None else contextlib.nullcontext()
+
     # -- the chain -----------------------------------------------------
 
     def head_hash(self) -> str:
@@ -381,8 +560,10 @@ class MemoryCloud:
         the tampering verified as genuine. Maintenance therefore
         checks the chain BEFORE it changes anything: a chain that
         does not verify is evidence, and evidence is not re-sealed
-        away. The full storage redesign remains TEC-6; this guard is
-        the interim integrity rule.
+        away. The Option A storage discipline (implemented Nov 21,
+        2026) makes maintenance atomic; this guard remains in force
+        alongside it — atomicity protects against interruption, the
+        guard against laundering a tampered chain.
         """
         if not self.verify_chain():
             raise ChainIntegrityError(
@@ -506,6 +687,20 @@ class MemoryCloud:
     ) -> list[MemoryRecord]:
         """Distill clusters of episodes into semantic records.
 
+        (The full docstring lives on ``_consolidate``.) The pass runs
+        inside the store's maintenance batch when it offers one
+        (Option A, TEC-6): the whole changed + resealed chain is
+        computed in memory and committed in one atomic save, so an
+        interruption cannot leave a half-maintained file behind.
+        """
+        with self._store_batch():
+            return self._consolidate(created_at)
+
+    def _consolidate(
+        self, created_at: datetime | str | None = None
+    ) -> list[MemoryRecord]:
+        """Distill clusters of episodes into semantic records.
+
         For each tag shared by at least ``consolidate_min_episodes``
         episodic records not yet consolidated, one semantic record is
         written — owned by the shared shelf, tagged with the cluster's
@@ -590,6 +785,19 @@ class MemoryCloud:
     # -- forgetting --------------------------------------------------------
 
     def decay_and_prune(
+        self, now: datetime | str | None = None
+    ) -> int:
+        """Forget records that have faded below the prune threshold.
+
+        (The full docstring lives on ``_decay_and_prune``.) Like
+        consolidation, the pass runs inside the store's maintenance
+        batch when it offers one (Option A, TEC-6): compute in
+        memory, commit once.
+        """
+        with self._store_batch():
+            return self._decay_and_prune(now)
+
+    def _decay_and_prune(
         self, now: datetime | str | None = None
     ) -> int:
         """Forget records that have faded below the prune threshold.
