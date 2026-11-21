@@ -274,12 +274,21 @@ class JsonFileStore(MemoryStore):
       commit or a plain append — rolls the working copy back to the
       file's contents and removes the abandoned temp file, so an
       uncommitted record never lingers as a phantom.
+    * Reads are transaction-isolated (Linear re-audit fix, Nov 21,
+      2026): while a batch is open, reads (``get``/``all``/``find``)
+      from any thread OTHER than the batch's owner serve the last
+      COMMITTED snapshot, never the batch's uncommitted working
+      copy; the owner still reads its own working copy. A commit
+      publishes the new state in one step; an abort means the
+      uncommitted records never existed for any reader.
 
-    Reads (``get``/``all``/``find``) serve the working copy; the file
-    is re-read at construction, before every mutation, and at the
-    start of every batch. The discipline's limit is the brief's own:
-    it protects against accidents and overlapping instances on one
-    machine; it is not a multi-user database.
+    Outside a batch, reads serve the working copy, which outside a
+    batch IS the committed state (every mutation saves at once or
+    rolls back). The file is re-read at construction, before every
+    mutation, and at the start of every batch. The discipline's
+    limit is the brief's own: it protects against accidents and
+    overlapping instances on one machine; it is not a multi-user
+    database.
     """
 
     def __init__(self, path: str | Path) -> None:
@@ -294,6 +303,10 @@ class JsonFileStore(MemoryStore):
             with self.path.open(encoding="utf-8") as handle:
                 data = json.load(handle)
             self._records = [MemoryRecord.from_dict(d) for d in data]
+        # The last committed state: what the file held at the last
+        # successful save (or load). While a batch is open, non-owner
+        # reads serve this snapshot, never the working copy.
+        self._committed: list[MemoryRecord] = list(self._records)
 
     # -- the Option A machinery --------------------------------------
 
@@ -344,6 +357,9 @@ class JsonFileStore(MemoryStore):
             self._records = [MemoryRecord.from_dict(d) for d in data]
         else:
             self._records = []
+        # A reload makes the working copy the file's contents —
+        # which is by definition the committed state.
+        self._committed = list(self._records)
 
     def _save_locked(self) -> None:
         """Write the working copy in one atomic rename. Lock held.
@@ -365,6 +381,9 @@ class JsonFileStore(MemoryStore):
                     indent=1,
                 )
             os.replace(tmp, self.path)
+            # The rename landed: the working copy IS the committed
+            # state now, published to non-owner readers in one step.
+            self._committed = list(self._records)
         except BaseException:
             with contextlib.suppress(OSError):
                 tmp.unlink()
@@ -481,17 +500,31 @@ class JsonFileStore(MemoryStore):
                     self._reload_locked()
                 raise
 
+    def _readable(self) -> list[MemoryRecord]:
+        """The records a read from THIS thread may serve.
+
+        Transaction isolation (Linear re-audit fix, Nov 21, 2026):
+        while a batch owned by another thread is open, the working
+        copy holds that batch's uncommitted state, so other threads
+        read the last committed snapshot instead. The batch's owner
+        — and every reader when no batch is open — reads the working
+        copy, which outside a batch is the committed state.
+        """
+        if self._batching and self._batch_owner != threading.get_ident():
+            return list(self._committed)
+        return list(self._records)
+
     def get(self, record_id: str) -> MemoryRecord | None:
-        for record in self._records:
+        for record in self._readable():
             if record.id == record_id:
                 return record
         return None
 
     def all(self) -> list[MemoryRecord]:
-        return list(self._records)
+        return self._readable()
 
     def find(self, kind=None, owner=None, tag=None) -> list[MemoryRecord]:
-        return [r for r in self._records if _matches(r, kind, owner, tag)]
+        return [r for r in self._readable() if _matches(r, kind, owner, tag)]
 
     def remove(self, record_id: str) -> bool:
         with self._locked():
@@ -605,8 +638,8 @@ class MemoryCloud:
             prev = record.record_hash
         return True
 
-    def _verified_record_ids(self) -> set[str]:
-        """The ids of records whose provenance seal checks out.
+    def _verified_record_seals(self) -> set[tuple[str, str]]:
+        """The (id, record_hash) seals of records that verify.
 
         The same two checks verify_chain() makes — each record's
         prev_hash equals the previous record's hash (genesis for the
@@ -614,15 +647,25 @@ class MemoryCloud:
         current contents — evaluated per record over the store's
         insertion order, so a caller can exclude exactly the records
         that fail instead of trusting or rejecting the whole shelf.
+
+        The result is keyed by the record's own seal, NOT by its id
+        alone (Linear re-audit fix, Nov 21, 2026): the first version
+        of this filter collected verified IDs and admitted any
+        record carrying one, so a corrupted record that REUSED an
+        honest record's id was recalled as genuine — its own seal
+        was never checked. Two records sharing an id are now judged
+        independently: each is admitted only under its own
+        (id, record_hash) pair, and a pair verifies only when the
+        record standing under it recomputes to that very hash.
         """
-        verified: set[str] = set()
+        verified: set[tuple[str, str]] = set()
         prev = GENESIS_HASH
         for record in self.store.all():
             if (
                 record.prev_hash == prev
                 and record.record_hash == record.compute_hash()
             ):
-                verified.add(record.id)
+                verified.add((record.id, record.record_hash))
             prev = record.record_hash
         return verified
 
@@ -741,18 +784,22 @@ class MemoryCloud:
         genuine, and its id is surfaced on
         ``last_recall_exclusions`` rather than the exclusion being
         hidden. Maintenance already refused to re-seal over such a
-        record; recall now refuses to serve it as the past.
+        record; recall now refuses to serve it as the past. The
+        check is per record, under the record's own seal: a
+        corrupted record that reuses an honest record's id fails
+        its own hash check and is excluded — and surfaced — even
+        though its honest twin is served (Linear re-audit fix).
         """
         moment = _parse_iso(_as_iso(now))
         found = self.store.find(kind=kind, owner=owner, tag=tag)
         if text is not None:
             needle = text.lower()
             found = [r for r in found if needle in r.content.lower()]
-        verified = self._verified_record_ids()
+        verified = self._verified_record_seals()
         self.last_recall_exclusions = [
-            r.id for r in found if r.id not in verified
+            r.id for r in found if (r.id, r.record_hash) not in verified
         ]
-        found = [r for r in found if r.id in verified]
+        found = [r for r in found if (r.id, r.record_hash) in verified]
         # tags are copied explicitly: dataclasses.replace is shallow,
         # so without the copy a recalled record would share its tags
         # list with the stored record, and a caller's append would

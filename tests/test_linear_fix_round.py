@@ -150,10 +150,22 @@ def _threaded_batch_scenario(tmp_path, a_aborts: bool):
                 release_a.wait(timeout=15)
                 cloud.remember("episodic", "A's record", "test")
                 if a_aborts:
-                    raise RuntimeError("A aborts")
+                    try:
+                        raise RuntimeError("A aborts")
+                    except RuntimeError:
+                        # Recorded while the batch — and its lock —
+                        # is still held, so the append is ordered
+                        # before B can possibly enter, which the
+                        # exact-sequence assertions below rely on.
+                        # Appending in the outer handler instead
+                        # would happen AFTER lock release and race
+                        # B's entry (Linear re-audit, Nov 21, 2026:
+                        # the asserted order was not guaranteed).
+                        events.append("a-aborted")
+                        raise
                 events.append("a-out")
         except RuntimeError:
-            events.append("a-aborted")
+            pass
         except BaseException as exc:  # noqa: BLE001
             errors.append(exc)
 

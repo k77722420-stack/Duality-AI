@@ -75,30 +75,133 @@ from .pipeline import DualityPipeline
 
 _RELEASED = ("proceed", "proceed_with_leniency")
 
+# The durable payload's recall-embedding contract (Linear re-audit
+# fix, Nov 21, 2026). Round 1's movement-7 payload embedded the
+# FULL content of every recalled record; episodes recall earlier
+# episodes, so each new episode carried copies of all prior
+# payloads — measured growth of 2.14–2.34x per run — and a pruned
+# record's content survived forever inside its successors,
+# defeating Layer Three's forgetting law. The contract now:
+#
+#   * Per shelf, at most _RECALL_EMBED_LIMIT recalled records are
+#     embedded (recall ranks strongest first; the payload keeps
+#     the head of that ranking).
+#   * Each embedded entry is a REFERENCE — id, kind, owner,
+#     source — plus bounded evidence, and nothing more:
+#       - a recalled EPISODE (its content parses as a payload:
+#         a JSON object carrying "prompt" and "decision") embeds
+#         only its gate ``decision``. An episode's serialized
+#         payload is never copied, in whole or in part, into
+#         another episode.
+#       - any other record embeds ``excerpt``: at most the first
+#         _RECALL_EXCERPT_CHARS characters of its content.
+#   * The recalled section of an episode is therefore bounded by
+#     a constant independent of the store's history, and episode
+#     size stays roughly flat across runs.
+#   * Forgetting: once a record is removed it cannot be recalled,
+#     so episodes written afterwards contain nothing of it. An
+#     episode record's content never propagates at all. A plain
+#     record's content can outlive its removal only as the capped
+#     excerpts already embedded in episodes written while it
+#     lived — never its full content.
+_RECALL_EMBED_LIMIT = 5
+_RECALL_EXCERPT_CHARS = 200
 
-def _content_texts(value, depth: int = 0):
-    """Yield every string in a parsed JSON value, recursively.
 
-    A string that itself parses as a JSON object or array is walked
-    too (depth-bounded): an episode payload embeds earlier records'
-    serialized content in its recall summary, and the door must
-    judge that text with its escapes decoded as well.
+def _recalled_evidence(entry: dict) -> dict:
+    """One recalled record's bounded embedding in an episode.
+
+    ``entry`` is a recall summary as ``_recall_precedent`` returns
+    it. The result follows the contract stated at
+    ``_RECALL_EMBED_LIMIT``: reference fields always; a recalled
+    episode contributes only its decision; any other record
+    contributes a capped excerpt of its content.
     """
-    if isinstance(value, str):
-        yield value
-        if depth < 4:
-            try:
-                nested = json.loads(value)
-            except ValueError:
-                return
-            if isinstance(nested, (dict, list)):
-                yield from _content_texts(nested, depth + 1)
-    elif isinstance(value, dict):
-        for item in value.values():
-            yield from _content_texts(item, depth)
-    elif isinstance(value, list):
-        for item in value:
-            yield from _content_texts(item, depth)
+    evidence = {
+        "id": entry["id"],
+        "kind": entry["kind"],
+        "owner": entry["owner"],
+        "source": entry["source"],
+    }
+    parsed = None
+    try:
+        parsed = json.loads(entry["content"])
+    except (ValueError, TypeError, RecursionError):
+        parsed = None
+    if isinstance(parsed, dict) and "prompt" in parsed and "decision" in parsed:
+        evidence["decision"] = parsed["decision"]
+    else:
+        evidence["excerpt"] = entry["content"][:_RECALL_EXCERPT_CHARS]
+    return evidence
+
+
+class _UninspectableContentError(Exception):
+    """Content the door cannot fully inspect within its budget.
+
+    Raised when a parsed JSON value nests deeper — or spreads
+    wider — than the inspection budget, or when a parser recursion
+    limit is hit on the way in. The door treats this as flagged,
+    never as clean and never as a crash: the write is refused and
+    the refusal is surfaced (see ``DualitySystem._judge_write``).
+    """
+
+
+# The door's inspection budget. Depth counts EVERY descent — into
+# a dict, into a list, and into a string that itself parses as
+# JSON — and the node cap bounds breadth as well. The first walk
+# bounded only the string-descent branch, so plain dict/list
+# nesting recursed until the interpreter raised RecursionError
+# (Linear re-audit, Nov 21, 2026); the walk is now iterative and
+# the budget applies on every branch.
+_MAX_INSPECT_DEPTH = 100
+_MAX_INSPECT_NODES = 50_000
+# A string that itself parses as JSON is decoded and walked at
+# most this many levels down (the pre-existing bound, kept).
+_MAX_NESTED_JSON_DEPTH = 4
+
+
+def _content_texts(value):
+    """Yield every string in a parsed JSON value, iteratively.
+
+    Object KEYS are yielded alongside values (Linear re-audit fix,
+    Nov 21, 2026): the first walk visited values only, so a flagged
+    phrase sitting in a key — ``{"fake review": "ordinary note"}``
+    — was never judged at all. A string that itself parses as a
+    JSON object or array is walked too: an episode payload embeds
+    earlier records' serialized content in its recall summary, and
+    the door must judge that text with its escapes decoded as well.
+
+    Raises ``_UninspectableContentError`` when the value exceeds
+    the inspection budget — the caller must not pass such content
+    as judged-clean.
+    """
+    stack = [(value, 0, 0)]
+    nodes = 0
+    while stack:
+        item, depth, json_depth = stack.pop()
+        nodes += 1
+        if nodes > _MAX_INSPECT_NODES or depth > _MAX_INSPECT_DEPTH:
+            raise _UninspectableContentError(
+                f"content exceeds the inspection budget "
+                f"(depth > {_MAX_INSPECT_DEPTH} or "
+                f"nodes > {_MAX_INSPECT_NODES})"
+            )
+        if isinstance(item, str):
+            yield item
+            if json_depth < _MAX_NESTED_JSON_DEPTH:
+                try:
+                    nested = json.loads(item)
+                except (ValueError, RecursionError):
+                    continue
+                if isinstance(nested, (dict, list)):
+                    stack.append((nested, depth + 1, json_depth + 1))
+        elif isinstance(item, dict):
+            for key, item_value in item.items():
+                stack.append((key, depth + 1, json_depth))
+                stack.append((item_value, depth + 1, json_depth))
+        elif isinstance(item, list):
+            for item_value in item:
+                stack.append((item_value, depth + 1, json_depth))
 
 
 def _judged_signals(content: str) -> list[str]:
@@ -114,14 +217,24 @@ def _judged_signals(content: str) -> list[str]:
     because the stored form hid the phrase. For JSON content,
     detection therefore runs over its string values — escapes
     decoded by the parse — and the
-    signals are the union over those values. Non-JSON content is
-    judged as the raw text it is. The door's POLICY is unchanged:
-    what the detector flags in a step's text is flagged at the door.
+    signals are the union over those strings — object keys
+    included. Non-JSON content is judged as the raw text it is.
+    The door's POLICY is unchanged: what the detector flags in a
+    step's text is flagged at the door.
+
+    Content too deep or too wide to inspect within the budget
+    raises ``_UninspectableContentError`` instead of passing
+    unjudged (or crashing on the parser's recursion limit): the
+    door fails closed on what it cannot see.
     """
     try:
         parsed = json.loads(content)
     except (ValueError, TypeError):
         return detect_signals(content)
+    except RecursionError as error:
+        raise _UninspectableContentError(
+            "content nesting defeats the JSON parser itself"
+        ) from error
     if not isinstance(parsed, (dict, list)):
         return detect_signals(content)
     signals: set[str] = set()
@@ -188,9 +301,32 @@ class DualitySystem:
         the caller can see WHY a write was refused. The write
         proceeds only on a releasing decision.
         """
+        try:
+            signals = _judged_signals(record.content)
+        except _UninspectableContentError as error:
+            # Fail closed (Linear re-audit fix, Nov 21, 2026):
+            # content the door cannot fully inspect is refused,
+            # never waved through unjudged — and the refusal is
+            # surfaced in the judgment, like any other refusal.
+            self.last_write_judgment = {
+                "record_id": record.id,
+                "decision": "stop",
+                "reasons": [
+                    {
+                        "clause": "guarded-door",
+                        "outcome": "uninspectable_content",
+                        "detail": (
+                            "The write's content exceeds the door's "
+                            f"inspection budget ({error}); the write "
+                            "is refused rather than passed unjudged."
+                        ),
+                    }
+                ],
+            }
+            return False
         proposal = {
             "summary": record.content,
-            "signals": _judged_signals(record.content),
+            "signals": signals,
             "contexts": [],
         }
         decision, reasons = self.gate.evaluate(proposal)
@@ -291,13 +427,38 @@ class DualitySystem:
         # and the released answer — not only the three summary keys
         # it carried before (Linear audit fix, Nov 21, 2026: the
         # trace already produced all of it; serialization dropped
-        # it). Older minimal records remain readable: nothing on the
-        # read path requires the new keys.
+        # it). What was recalled is embedded as bounded references,
+        # not full content (see _RECALL_EMBED_LIMIT), and a failed
+        # stage's error/detail is carried, not dropped. Older
+        # minimal records remain readable: nothing on the read path
+        # requires the new keys.
         stage_outputs = {
             entry["stage"]: entry["output"]
             for entry in trace["stages"]
             if "output" in entry
         }
+        # A stage that FAILED (the live pipeline's malformed-reply
+        # path) leaves an entry carrying error/detail instead of an
+        # output. Round 1's payload construction kept only outputs,
+        # so the failure vanished from the durable record and the
+        # stored stop was unexplained (Linear re-audit, Nov 21,
+        # 2026). Failures are now carried into the payload: in the
+        # ``failures`` section, and in the failed stage's own slot
+        # (hemisphere / hub) in place of the None it used to get.
+        stage_failures = {
+            entry["stage"]: {
+                "error": entry.get("error"),
+                "detail": entry.get("detail"),
+            }
+            for entry in trace["stages"]
+            if "output" not in entry and "error" in entry
+        }
+
+        def stage_evidence(stage: str):
+            if stage in stage_outputs:
+                return stage_outputs[stage]
+            return stage_failures.get(stage)
+
         gate_output = stage_outputs.get("morality_gate") or {}
         payload = {
             "prompt": trace["prompt"],
@@ -305,21 +466,17 @@ class DualitySystem:
             "released": trace["released"],
             "recalled": {
                 shelf: [
-                    {
-                        "id": entry["id"],
-                        "kind": entry["kind"],
-                        "source": entry["source"],
-                        "content": entry["content"],
-                    }
-                    for entry in entries
+                    _recalled_evidence(entry)
+                    for entry in entries[:_RECALL_EMBED_LIMIT]
                 ]
                 for shelf, entries in recall.items()
             },
             "hemispheres": {
-                "logical": stage_outputs.get("logical_hemisphere"),
-                "creative": stage_outputs.get("creative_hemisphere"),
+                "logical": stage_evidence("logical_hemisphere"),
+                "creative": stage_evidence("creative_hemisphere"),
             },
-            "hub": stage_outputs.get("hub"),
+            "hub": stage_evidence("hub"),
+            "failures": stage_failures,
             "gate": {
                 "decision": gate_output.get(
                     "decision", trace["decision"]
