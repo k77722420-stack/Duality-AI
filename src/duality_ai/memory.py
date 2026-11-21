@@ -267,6 +267,13 @@ class JsonFileStore(MemoryStore):
       compute the full changed state in memory, and commit it in ONE
       atomic save (TEC-6): an interruption mid-maintenance leaves the
       old, still-valid file untouched.
+    * Batch ownership is PER-THREAD (Linear audit fix, Nov 21, 2026):
+      only the thread that opened a batch may re-enter it as
+      "nested"; any other thread's batch waits on the lock and runs
+      as its own batch afterwards. And a FAILED save — in a batch
+      commit or a plain append — rolls the working copy back to the
+      file's contents and removes the abandoned temp file, so an
+      uncommitted record never lingers as a phantom.
 
     Reads (``get``/``all``/``find``) serve the working copy; the file
     is re-read at construction, before every mutation, and at the
@@ -282,6 +289,7 @@ class JsonFileStore(MemoryStore):
         self._lock_handle = None
         self._thread_lock = threading.RLock()
         self._batching = False
+        self._batch_owner: int | None = None
         if self.path.exists():
             with self.path.open(encoding="utf-8") as handle:
                 data = json.load(handle)
@@ -338,19 +346,29 @@ class JsonFileStore(MemoryStore):
             self._records = []
 
     def _save_locked(self) -> None:
-        """Write the working copy in one atomic rename. Lock held."""
+        """Write the working copy in one atomic rename. Lock held.
+
+        A failure before the rename completes removes the temporary
+        file: a crashed save must not litter the directory with
+        abandoned ``.tmp-<uuid>`` files (Linear audit, Nov 21, 2026).
+        """
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_name(
             f"{self.path.name}.tmp-{uuid.uuid4().hex}"
         )
-        with tmp.open("w", encoding="utf-8") as handle:
-            json.dump(
-                [r.to_dict() for r in self._records],
-                handle,
-                ensure_ascii=False,
-                indent=1,
-            )
-        os.replace(tmp, self.path)
+        try:
+            with tmp.open("w", encoding="utf-8") as handle:
+                json.dump(
+                    [r.to_dict() for r in self._records],
+                    handle,
+                    ensure_ascii=False,
+                    indent=1,
+                )
+            os.replace(tmp, self.path)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                tmp.unlink()
+            raise
 
     def _save(self) -> None:
         """Save now — unless a batch is deferring the commit."""
@@ -384,26 +402,37 @@ class JsonFileStore(MemoryStore):
         computes over the file's true current contents. Saves are
         deferred while the batch runs; on clean exit the whole
         working copy is committed in ONE atomic save (TEC-6). If the
-        body raises, the uncommitted in-memory work is discarded by
-        reloading, and the file keeps its previous, still-valid
-        contents. A batch nested inside a batch simply joins the
-        outer one.
+        body raises — or the commit itself fails — the uncommitted
+        in-memory work is discarded by reloading, and the file keeps
+        its previous, still-valid contents.
+
+        Ownership is per-thread (Linear audit fix, Nov 21, 2026):
+        a batch nested inside the SAME thread's batch simply joins
+        the outer one, but a batch opened by any OTHER thread does
+        not slip in through the nested path — it waits on the lock
+        like every other mutation and runs as its own batch once
+        the owner's batch has committed or rolled back. Before this
+        fix the instance-wide ``_batching`` flag was checked before
+        the lock, so a second thread entered unlocked: its in-place
+        edits could leak into the owner's commit, or vanish under
+        the owner's rollback.
         """
-        if self._batching:
+        if self._batching and self._batch_owner == threading.get_ident():
             yield
             return
         with self._locked():
             self._reload_locked()
             self._batching = True
+            self._batch_owner = threading.get_ident()
             try:
                 yield
+                self._save_locked()
             except BaseException:
                 self._reload_locked()  # discard the uncommitted work
                 raise
-            else:
-                self._save_locked()
             finally:
                 self._batching = False
+                self._batch_owner = None
 
     def _persist_mutation(self, record: MemoryRecord) -> None:
         """Re-save after an in-place change to a stored record.
@@ -426,7 +455,13 @@ class JsonFileStore(MemoryStore):
                 for f in fields(record):
                     if f.name != "id":
                         setattr(fresh, f.name, getattr(record, f.name))
-            self._save_locked()
+            try:
+                self._save_locked()
+            except BaseException:
+                # The edit never reached disk; do not leave it
+                # standing in the working copy (Linear audit fix).
+                self._reload_locked()
+                raise
 
     def put(self, record: MemoryRecord) -> None:
         with self._locked():
@@ -434,7 +469,17 @@ class JsonFileStore(MemoryStore):
                 self._reload_locked()
             self._relink_locked(record)
             self._records.append(record)
-            self._save()
+            try:
+                self._save()
+            except BaseException:
+                if not self._batching:
+                    # The save failed: the append never reached
+                    # disk, so it must not linger in the working
+                    # copy as a phantom record (Linear audit fix,
+                    # Nov 21, 2026). Under a batch the batch's own
+                    # rollback owns the working copy.
+                    self._reload_locked()
+                raise
 
     def get(self, record_id: str) -> MemoryRecord | None:
         for record in self._records:
@@ -458,7 +503,14 @@ class JsonFileStore(MemoryStore):
             ]
             if len(self._records) == before:
                 return False
-            self._save()
+            try:
+                self._save()
+            except BaseException:
+                if not self._batching:
+                    # As in put(): a removal whose save failed is
+                    # not a removal — restore the working copy.
+                    self._reload_locked()
+                raise
             return True
 
 
@@ -510,6 +562,9 @@ class MemoryCloud:
             self.policy["consolidate_min_episodes"]
         )
         self.write_hook = write_hook
+        # Ids of records the most recent recall() excluded because
+        # their provenance seal did not verify (see recall()).
+        self.last_recall_exclusions: list[str] = []
 
     def set_write_hook(self, hook) -> None:
         """Register (or clear, with None) the guarded-write hook."""
@@ -549,6 +604,27 @@ class MemoryCloud:
                 return False
             prev = record.record_hash
         return True
+
+    def _verified_record_ids(self) -> set[str]:
+        """The ids of records whose provenance seal checks out.
+
+        The same two checks verify_chain() makes — each record's
+        prev_hash equals the previous record's hash (genesis for the
+        first) and each record_hash equals the hash of its own
+        current contents — evaluated per record over the store's
+        insertion order, so a caller can exclude exactly the records
+        that fail instead of trusting or rejecting the whole shelf.
+        """
+        verified: set[str] = set()
+        prev = GENESIS_HASH
+        for record in self.store.all():
+            if (
+                record.prev_hash == prev
+                and record.record_hash == record.compute_hash()
+            ):
+                verified.add(record.id)
+            prev = record.record_hash
+        return verified
 
     def _require_verified_chain(self, action: str) -> None:
         """Refuse to let maintenance launder a broken chain.
@@ -657,12 +733,26 @@ class MemoryCloud:
         Returned records are copies carrying their *current* decayed
         strength; the stored records are never mutated by a recall.
         ``text`` matches a case-insensitive substring of the content.
+
+        Provenance is checked on the way out (Linear audit fix,
+        Nov 21, 2026): a record whose seal does not verify — content
+        edited outside the system's operations, hashes untouched —
+        is EXCLUDED from the results instead of being recalled as
+        genuine, and its id is surfaced on
+        ``last_recall_exclusions`` rather than the exclusion being
+        hidden. Maintenance already refused to re-seal over such a
+        record; recall now refuses to serve it as the past.
         """
         moment = _parse_iso(_as_iso(now))
         found = self.store.find(kind=kind, owner=owner, tag=tag)
         if text is not None:
             needle = text.lower()
             found = [r for r in found if needle in r.content.lower()]
+        verified = self._verified_record_ids()
+        self.last_recall_exclusions = [
+            r.id for r in found if r.id not in verified
+        ]
+        found = [r for r in found if r.id in verified]
         # tags are copied explicitly: dataclasses.replace is shallow,
         # so without the copy a recalled record would share its tags
         # list with the stored record, and a caller's append would

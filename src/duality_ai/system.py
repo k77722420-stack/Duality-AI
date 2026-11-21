@@ -76,6 +76,60 @@ from .pipeline import DualityPipeline
 _RELEASED = ("proceed", "proceed_with_leniency")
 
 
+def _content_texts(value, depth: int = 0):
+    """Yield every string in a parsed JSON value, recursively.
+
+    A string that itself parses as a JSON object or array is walked
+    too (depth-bounded): an episode payload embeds earlier records'
+    serialized content in its recall summary, and the door must
+    judge that text with its escapes decoded as well.
+    """
+    if isinstance(value, str):
+        yield value
+        if depth < 4:
+            try:
+                nested = json.loads(value)
+            except ValueError:
+                return
+            if isinstance(nested, (dict, list)):
+                yield from _content_texts(nested, depth + 1)
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from _content_texts(item, depth)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _content_texts(item, depth)
+
+
+def _judged_signals(content: str) -> list[str]:
+    """The shared detector's reading of the text a record carries.
+
+    The door judges the same text the pipeline judged (Linear audit
+    fix, Nov 21, 2026). Record content is often a JSON payload — the
+    movement-7 episode — and in serialized form the whitespace
+    inside a flagged phrase is an escape sequence (``\\n``), which
+    the detector's whitespace normalization cannot see: a flagged
+    phrase split by a newline in the prompt was detected and
+    stopped by the pipeline, then judged "proceed" at the door
+    because the stored form hid the phrase. For JSON content,
+    detection therefore runs over its string values — escapes
+    decoded by the parse — and the
+    signals are the union over those values. Non-JSON content is
+    judged as the raw text it is. The door's POLICY is unchanged:
+    what the detector flags in a step's text is flagged at the door.
+    """
+    try:
+        parsed = json.loads(content)
+    except (ValueError, TypeError):
+        return detect_signals(content)
+    if not isinstance(parsed, (dict, list)):
+        return detect_signals(content)
+    signals: set[str] = set()
+    for text in _content_texts(parsed):
+        signals.update(detect_signals(text))
+    return sorted(signals)
+
+
 class DualitySystem:
     """One Duality AI, assembled: pipeline + barrier + memory cloud.
 
@@ -118,6 +172,9 @@ class DualitySystem:
         )
         self.cloud.set_write_hook(self._judge_write)
         self.last_write_judgment: dict | None = None
+        # Ids the most recent run's recall excluded because their
+        # provenance seal did not verify (memory layer, recall()).
+        self.last_recall_exclusions: list[str] = []
 
     # -- the guarded door (movement 7's other half) -------------------
 
@@ -133,7 +190,7 @@ class DualitySystem:
         """
         proposal = {
             "summary": record.content,
-            "signals": detect_signals(record.content),
+            "signals": _judged_signals(record.content),
             "contexts": [],
         }
         decision, reasons = self.gate.evaluate(proposal)
@@ -155,7 +212,12 @@ class DualitySystem:
         not consumed by the skeleton pipeline (seam 1).
         """
         recall: dict[str, list[dict]] = {}
+        excluded: list[str] = []
         for shelf in ("logical", "creative", "shared"):
+            records = self.cloud.recall(owner=shelf)
+            # The cloud excludes records whose provenance seal does
+            # not verify; surface the exclusions, never hide them.
+            excluded.extend(self.cloud.last_recall_exclusions)
             recall[shelf] = [
                 {
                     "id": record.id,
@@ -168,8 +230,9 @@ class DualitySystem:
                     "strength": record.strength,
                     "content": record.content,
                 }
-                for record in self.cloud.recall(owner=shelf)
+                for record in records
             ]
+        self.last_recall_exclusions = excluded
         return recall
 
     # -- the barrier's sizing input -------------------------------------
@@ -221,17 +284,58 @@ class DualitySystem:
 
         # Movement 7 — the episode is written, through the guarded
         # door: the gate judges the write before anything is stored.
+        # The durable record carries the full movement-7 evidence
+        # THESIS §3 prescribes — the request as admitted, what was
+        # recalled, the hemispheres' contributions in summary, the
+        # hub's weighing trace, the gate's decision AND its reasons,
+        # and the released answer — not only the three summary keys
+        # it carried before (Linear audit fix, Nov 21, 2026: the
+        # trace already produced all of it; serialization dropped
+        # it). Older minimal records remain readable: nothing on the
+        # read path requires the new keys.
+        stage_outputs = {
+            entry["stage"]: entry["output"]
+            for entry in trace["stages"]
+            if "output" in entry
+        }
+        gate_output = stage_outputs.get("morality_gate") or {}
+        payload = {
+            "prompt": trace["prompt"],
+            "decision": trace["decision"],
+            "released": trace["released"],
+            "recalled": {
+                shelf: [
+                    {
+                        "id": entry["id"],
+                        "kind": entry["kind"],
+                        "source": entry["source"],
+                        "content": entry["content"],
+                    }
+                    for entry in entries
+                ]
+                for shelf, entries in recall.items()
+            },
+            "hemispheres": {
+                "logical": stage_outputs.get("logical_hemisphere"),
+                "creative": stage_outputs.get("creative_hemisphere"),
+            },
+            "hub": stage_outputs.get("hub"),
+            "gate": {
+                "decision": gate_output.get(
+                    "decision", trace["decision"]
+                ),
+                "reasons": gate_output.get("reasons", []),
+            },
+            "answer": (
+                (proposal.get("step") or proposal.get("summary"))
+                if trace["released"]
+                else None
+            ),
+        }
         self.last_write_judgment = None
         record = self.cloud.remember(
             kind="episodic",
-            content=json.dumps(
-                {
-                    "prompt": trace["prompt"],
-                    "decision": trace["decision"],
-                    "released": trace["released"],
-                },
-                sort_keys=True,
-            ),
+            content=json.dumps(payload, sort_keys=True),
             source="pipeline",
             stage="post-gate",
             owner="shared",
@@ -246,6 +350,7 @@ class DualitySystem:
         return {
             "prompt": trace["prompt"],
             "recall": recall,
+            "recall_exclusions": list(self.last_recall_exclusions),
             "pipeline": trace,
             "decision": trace["decision"],
             "released": trace["released"],

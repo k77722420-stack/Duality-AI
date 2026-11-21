@@ -77,11 +77,25 @@ def test_benign_step_runs_every_layer_and_is_remembered():
     assert record.source == "pipeline"
     assert record.stage == "post-gate"
     assert record.tags == ["pipeline-run", "gate:proceed"]
-    assert json.loads(record.content) == {
-        "prompt": BENIGN,
-        "decision": "proceed",
-        "released": True,
+    # The payload's original three fields are unchanged; the record
+    # ALSO carries the rest of the movement-7 evidence THESIS §3
+    # prescribes (Linear audit fix, Nov 21, 2026 — the exact-equality
+    # assertion this replaces predates the full payload).
+    payload = json.loads(record.content)
+    assert payload["prompt"] == BENIGN
+    assert payload["decision"] == "proceed"
+    assert payload["released"] is True
+    assert payload["recalled"] == {
+        "logical": [],
+        "creative": [],
+        "shared": [],
     }
+    assert payload["hemispheres"]["logical"] is not None
+    assert payload["hemispheres"]["creative"] is not None
+    assert payload["hub"]["accepted"]
+    assert payload["gate"]["decision"] == "proceed"
+    assert payload["gate"]["reasons"]
+    assert payload["answer"] == result["pipeline"]["proposal"]["step"]
     assert system.cloud.verify_chain() is True
 
 
