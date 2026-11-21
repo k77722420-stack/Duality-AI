@@ -686,7 +686,9 @@ class MemoryCloud:
             prev = record.record_hash
         return True
 
-    def _verified_records(self) -> list[MemoryRecord]:
+    def _verified_records(
+        self, records: list[MemoryRecord] | None = None
+    ) -> list[MemoryRecord]:
         """The records that verify, each judged in place.
 
         The same two checks verify_chain() makes — each record's
@@ -711,10 +713,19 @@ class MemoryCloud:
         content. Judged in place, the twin fails on its own
         contents no matter what it copied; the honest record
         beside it still verifies and is served.
+
+        ``records`` may supply the list to judge — one snapshot a
+        caller already read — so judgment and selection run over
+        the SAME objects from the SAME read (see recall(): joining
+        two reads by object identity is the fourth-look failure,
+        Nov 21, 2026). With no argument, the store's current
+        contents are read once, here.
         """
+        if records is None:
+            records = self.store.all()
         verified: list[MemoryRecord] = []
         prev = GENESIS_HASH
-        for record in self.store.all():
+        for record in records:
             if (
                 record.prev_hash == prev
                 and record.record_hash == record.compute_hash()
@@ -843,20 +854,34 @@ class MemoryCloud:
         a corrupted record that copies an honest record's id — or
         its id AND its stored hash — fails its own recompute and
         is excluded, and surfaced, even though its honest twin is
-        served (Linear re-audit and third-look fixes).
+        served (Linear re-audit and third-look fixes). Candidates
+        and verdicts come from ONE snapshot of the store, judged
+        and selected within the same read (Linear fourth look):
+        the check never joins two reads, so a concurrent save —
+        or a backend returning fresh copies per query — cannot
+        make honest records fail.
         """
         moment = _parse_iso(_as_iso(now))
-        found = self.store.find(kind=kind, owner=owner, tag=tag)
+        # ONE snapshot (Linear fourth look, Nov 21, 2026): the
+        # candidates and their provenance verdicts come from a
+        # single read of the store, and admission joins them by
+        # object identity WITHIN that read. The previous shape
+        # read twice — find() for the candidates, all() inside
+        # the verification pass — so a save landing between the
+        # reads (or any backend that hands out fresh copies per
+        # query, which the store contract permits) replaced the
+        # candidate objects with identical strangers: every
+        # honest record then failed as a provenance failure while
+        # the chain verified. From one list, a concurrent save is
+        # simply in the snapshot or not in it — never half-joined.
+        # (MemoryRecord is an unhashable dataclass, so the judged
+        # objects themselves cannot ride in a set; their id()s can.)
+        snapshot = self.store.all()
+        verified = {id(r) for r in self._verified_records(snapshot)}
+        found = [r for r in snapshot if _matches(r, kind, owner, tag)]
         if text is not None:
             needle = text.lower()
             found = [r for r in found if needle in r.content.lower()]
-        # Admission is by object identity: _verified_records()
-        # returns the very objects it judged, and the store's
-        # find/all hand out those same objects, so identity is
-        # exactly the attachment the detached-key versions lacked.
-        # (MemoryRecord is an unhashable dataclass, so the objects
-        # themselves cannot ride in a set; their id()s can.)
-        verified = {id(r) for r in self._verified_records()}
         self.last_recall_exclusions = [
             r.id for r in found if id(r) not in verified
         ]

@@ -95,15 +95,32 @@ _RELEASED = ("proceed", "proceed_with_leniency")
 #         another episode.
 #       - any other record embeds ``excerpt``: at most the first
 #         _RECALL_EXCERPT_CHARS characters of its content.
-#   * EVERY string in an embedded entry is capped at
+#   * EVERY value the embedding selects is capped at
 #     _RECALL_EXCERPT_CHARS — the reference fields and the gate
-#     ``decision`` included, not only the excerpt. The bound is
-#     unconditional (Linear third look, Nov 21, 2026): an imported
-#     record's fields are whatever the import carried, and a
-#     200,000-character ``decision`` value previously rode through
+#     ``decision`` included, not only the excerpt. A string is
+#     truncated; a non-string is embedded as its JSON
+#     serialization, truncated the same way. (Linear third look,
+#     Nov 21, 2026: a 200,000-character ``decision`` rode through
 #     the episode branch whole, producing a ~202 KB episode from
-#     one recalled record. A non-string decision is embedded as
-#     its JSON serialization, capped the same way.
+#     one recalled record. Linear fourth look: a ~200 KB list in
+#     an imported record's ``source`` did the same through the
+#     non-string pass-through.)
+#   * The guarantee, at its true width (Linear fourth look):
+#     the bound covers exactly the values ``_recalled_evidence``
+#     selects — the four reference fields and the one evidence
+#     field (``decision`` or ``excerpt``) — so one embedded
+#     entry is at most five capped values plus key names and
+#     punctuation, and an episode's recalled section is at most
+#     3 shelves x _RECALL_EMBED_LIMIT such entries, whatever
+#     any imported record carries in those fields. It does NOT
+#     bound the records themselves: a record in the store may
+#     carry arbitrarily large fields — what is bounded is what
+#     PROPAGATES from it into later episodes. Fields the
+#     embedding does not select (stage, tags, created_at,
+#     strength) are not embedded at all. The run RESULT's
+#     recall trace (movement 2) is a separate in-memory surface
+#     carrying full summaries; it is not the durable payload
+#     and is not covered by this bound.
 #   * The recalled section of an episode is therefore bounded by
 #     a constant independent of the store's history, and episode
 #     size stays roughly flat across runs.
@@ -118,16 +135,25 @@ _RECALL_EXCERPT_CHARS = 200
 
 
 def _cap_embedded(value):
-    """Cap one embedded string at the excerpt bound.
+    """Cap one embedded value at the excerpt bound.
 
-    Non-strings pass through untouched (the reference fields are
-    system-shaped in practice); every string is truncated to
-    ``_RECALL_EXCERPT_CHARS`` so the per-entry bound holds no
-    matter what an imported record carries.
+    A string is truncated to ``_RECALL_EXCERPT_CHARS``. A
+    NON-string — possible in any field of an imported record,
+    whose fields are whatever the import carried — is embedded
+    as its JSON serialization, truncated to the same bound
+    (``str()`` if serialization itself fails). Non-strings
+    previously passed through untouched, and a ~200 KB list in
+    an imported record's ``source`` rode into the next episode
+    whole (Linear fourth look, Nov 21, 2026); now every value
+    the embedding selects is capped, whatever its type.
     """
     if isinstance(value, str):
         return value[:_RECALL_EXCERPT_CHARS]
-    return value
+    try:
+        serialized = json.dumps(value, sort_keys=True)
+    except (TypeError, ValueError, RecursionError):
+        serialized = str(value)
+    return serialized[:_RECALL_EXCERPT_CHARS]
 
 
 def _recalled_evidence(entry: dict) -> dict:
@@ -138,8 +164,10 @@ def _recalled_evidence(entry: dict) -> dict:
     ``_RECALL_EMBED_LIMIT``: reference fields always; a recalled
     episode contributes only its decision; any other record
     contributes a capped excerpt of its content. Every embedded
-    string — reference fields and decision included — is capped
-    at the same bound (see the contract).
+    value — reference fields, decision, and excerpt alike — is
+    capped at the same bound by ``_cap_embedded``, strings by
+    truncation and non-strings by capped serialization (see the
+    contract for the guarantee's exact width).
     """
     evidence = {
         "id": _cap_embedded(entry["id"]),
@@ -153,15 +181,9 @@ def _recalled_evidence(entry: dict) -> dict:
     except (ValueError, TypeError, RecursionError):
         parsed = None
     if isinstance(parsed, dict) and "prompt" in parsed and "decision" in parsed:
-        decision = parsed["decision"]
-        if not isinstance(decision, str):
-            try:
-                decision = json.dumps(decision, sort_keys=True)
-            except (TypeError, ValueError, RecursionError):
-                decision = str(decision)
-        evidence["decision"] = decision[:_RECALL_EXCERPT_CHARS]
+        evidence["decision"] = _cap_embedded(parsed["decision"])
     else:
-        evidence["excerpt"] = entry["content"][:_RECALL_EXCERPT_CHARS]
+        evidence["excerpt"] = _cap_embedded(entry["content"])
     return evidence
 
 
@@ -174,6 +196,59 @@ class _UninspectableContentError(Exception):
     never as clean and never as a crash: the write is refused and
     the refusal is surfaced (see ``DualitySystem._judge_write``).
     """
+
+
+class _DuplicateKeyError(Exception):
+    """A JSON object in inspected content repeats a key.
+
+    Raised by ``_reject_duplicate_keys`` during a parse for
+    inspection; converted to ``_UninspectableContentError`` by
+    ``_parse_for_inspection`` — never propagated raw.
+    """
+
+
+def _reject_duplicate_keys(pairs: list) -> dict:
+    """``object_pairs_hook`` that refuses repeated keys.
+
+    Standard parsing keeps only the LAST value of a duplicated
+    key and discards the rest BEFORE inspection runs, so flagged
+    text in a discarded position passed the door unseen while
+    the record stored it verbatim (Linear fourth look, Nov 21,
+    2026). A repeated key makes the content ambiguous as
+    written — which of its values the record carries is a
+    parser convention, not a fact — so the hook raises instead
+    of choosing. The system's own serialization never repeats
+    a key, so nothing the system itself writes is affected.
+    """
+    obj: dict = {}
+    for key, value in pairs:
+        if key in obj:
+            raise _DuplicateKeyError(key)
+        obj[key] = value
+    return obj
+
+
+def _parse_for_inspection(text: str):
+    """Parse JSON the way the door inspects it.
+
+    Identical to ``json.loads`` except that an object repeating
+    a key — at any level of the document — is UNINSPECTABLE
+    rather than silently last-wins: ``_UninspectableContentError``
+    is raised, and the door fails closed on it like anything
+    else it cannot fully inspect. The parser's own ValueError /
+    RecursionError propagate unchanged; callers handle them as
+    before.
+    """
+    try:
+        return json.loads(
+            text, object_pairs_hook=_reject_duplicate_keys
+        )
+    except _DuplicateKeyError as error:
+        raise _UninspectableContentError(
+            "a JSON object repeats the key "
+            f"{error.args[0]!r}; which of its values the "
+            "content carries cannot be determined as written"
+        ) from error
 
 
 # The door's inspection budget. Depth counts EVERY descent — into
@@ -213,11 +288,15 @@ def _content_texts(value):
     plain text, fully inspected as yielded. But anything the walk
     cannot FULLY inspect raises ``_UninspectableContentError``:
     a value that exceeds the inspection budget, a string that
-    still parses as JSON when the budget runs out, or a string
+    still parses as JSON when the budget runs out, a string
     the parser itself cannot open (a RecursionError on
     pathological nesting is converted, never swallowed into
-    "plain text"). The governing principle: anything not fully
-    inspected is refused, never silently passed.
+    "plain text"), or a decoded object that repeats a key —
+    every parse on this path is the inspection parse, which
+    rejects duplicates rather than discarding all but the last
+    value unjudged (Linear fourth look, Nov 21, 2026). The
+    governing principle: anything not fully inspected is
+    refused, never silently passed.
     """
     stack = [(value, 0)]
     nodes = 0
@@ -233,7 +312,7 @@ def _content_texts(value):
         if isinstance(item, str):
             yield item
             try:
-                nested = json.loads(item)
+                nested = _parse_for_inspection(item)
             except ValueError:
                 continue  # plain text: fully inspected as yielded
             except RecursionError as error:
@@ -278,14 +357,19 @@ def _judged_signals(content: str) -> list[str]:
     The door's POLICY is unchanged: what the detector flags in a
     step's text is flagged at the door.
 
-    Content the walk cannot fully inspect within the budget
-    raises ``_UninspectableContentError`` instead of passing
-    unjudged (or crashing on the parser's recursion limit): the
-    door fails closed on what it cannot see — anything not fully
-    inspected is refused, never silently passed.
+    The parse itself is the inspection parse
+    (``_parse_for_inspection``): an object that repeats a key is
+    uninspectable, because standard parsing would discard all
+    but the last of its values before the walk could judge them
+    (Linear fourth look). Content the walk cannot fully inspect
+    within the budget raises ``_UninspectableContentError``
+    instead of passing unjudged (or crashing on the parser's
+    recursion limit): the door fails closed on what it cannot
+    see — anything not fully inspected is refused, never
+    silently passed.
     """
     try:
-        parsed = json.loads(content)
+        parsed = _parse_for_inspection(content)
     except (ValueError, TypeError):
         return detect_signals(content)
     except RecursionError as error:
