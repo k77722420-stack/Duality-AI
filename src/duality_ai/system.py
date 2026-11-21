@@ -191,8 +191,11 @@ class _UninspectableContentError(Exception):
     """Content the door cannot fully inspect within its budget.
 
     Raised when a parsed JSON value nests deeper — or spreads
-    wider — than the inspection budget, or when a parser recursion
-    limit is hit on the way in. The door treats this as flagged,
+    wider — than the inspection budget, when a parser recursion
+    limit is hit on the way in, or when a parse fails for a
+    reason other than a JSON syntax error (the content may be
+    structured, but the parser cannot open it, so it cannot be
+    fully inspected). The door treats this as flagged,
     never as clean and never as a crash: the write is refused and
     the refusal is surfaced (see ``DualitySystem._judge_write``).
     """
@@ -235,9 +238,12 @@ def _parse_for_inspection(text: str):
     a key — at any level of the document — is UNINSPECTABLE
     rather than silently last-wins: ``_UninspectableContentError``
     is raised, and the door fails closed on it like anything
-    else it cannot fully inspect. The parser's own ValueError /
-    RecursionError propagate unchanged; callers handle them as
-    before.
+    else it cannot fully inspect. The parser's own errors
+    propagate unchanged; callers distinguish them by kind — a
+    ``json.JSONDecodeError`` means the text simply is not JSON,
+    and every other failure (a conversion error such as an
+    integer past the parser's digit limit, a RecursionError)
+    is uninspectable (see ``_judged_signals``).
     """
     try:
         return json.loads(
@@ -284,14 +290,18 @@ def _content_texts(value):
     normalization cannot see until the string is decoded.
 
     Decoding continues until a string no longer parses as JSON —
-    there is no decoding floor. A string that fails to parse is
-    plain text, fully inspected as yielded. But anything the walk
-    cannot FULLY inspect raises ``_UninspectableContentError``:
+    there is no decoding floor. A string the parser rejects as
+    a SYNTAX error is plain text, fully inspected as yielded.
+    But anything the walk cannot FULLY inspect raises
+    ``_UninspectableContentError``:
     a value that exceeds the inspection budget, a string that
     still parses as JSON when the budget runs out, a string
     the parser itself cannot open (a RecursionError on
     pathological nesting is converted, never swallowed into
-    "plain text"), or a decoded object that repeats a key —
+    "plain text"), a string whose parse fails for a reason
+    OTHER than a syntax error (a conversion failure is not
+    evidence the string is plain text — Linear fifth look,
+    Nov 21, 2026), or a decoded object that repeats a key —
     every parse on this path is the inspection parse, which
     rejects duplicates rather than discarding all but the last
     value unjudged (Linear fourth look, Nov 21, 2026). The
@@ -313,11 +323,17 @@ def _content_texts(value):
             yield item
             try:
                 nested = _parse_for_inspection(item)
-            except ValueError:
+            except json.JSONDecodeError:
                 continue  # plain text: fully inspected as yielded
             except RecursionError as error:
                 raise _UninspectableContentError(
                     "a nested string defeats the JSON parser itself"
+                ) from error
+            except (ValueError, TypeError) as error:
+                raise _UninspectableContentError(
+                    "a nested string fails the JSON parser in a "
+                    "way that is not a syntax error "
+                    f"({error}); it cannot be fully inspected"
                 ) from error
             if isinstance(nested, (dict, list, str)):
                 if depth + 1 > _MAX_INSPECT_DEPTH:
@@ -353,7 +369,15 @@ def _judged_signals(content: str) -> list[str]:
     like any other value, NOT scanned in its raw serialized form
     (Linear third look: a top-level JSON string previously kept
     its escapes undecoded and a flagged phrase inside it passed
-    unseen). Non-JSON content is judged as the raw text it is.
+    unseen). Content the parser rejects as a SYNTAX error is
+    not JSON at all and is judged as the raw text it is; content
+    the parser fails on for any OTHER reason is uninspectable —
+    a conversion failure (an integer past the parser's digit
+    limit raises a ValueError that is not a JSONDecodeError) is
+    not evidence the content is plain text, and treating it as
+    such disabled the entire inspection, duplicate-key
+    rejection included, while escape-hidden flagged content was
+    stored verbatim (Linear fifth look, Nov 21, 2026).
     The door's POLICY is unchanged: what the detector flags in a
     step's text is flagged at the door.
 
@@ -370,11 +394,17 @@ def _judged_signals(content: str) -> list[str]:
     """
     try:
         parsed = _parse_for_inspection(content)
-    except (ValueError, TypeError):
+    except json.JSONDecodeError:
         return detect_signals(content)
     except RecursionError as error:
         raise _UninspectableContentError(
             "content nesting defeats the JSON parser itself"
+        ) from error
+    except (ValueError, TypeError) as error:
+        raise _UninspectableContentError(
+            "content fails the JSON parser in a way that is not "
+            f"a syntax error ({error}); it cannot be fully "
+            "inspected"
         ) from error
     signals: set[str] = set()
     for text in _content_texts(parsed):

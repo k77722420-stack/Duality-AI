@@ -60,6 +60,7 @@ total recall by design: a forgotten record is gone, link and all.
 from __future__ import annotations
 
 import contextlib
+import copy
 import hashlib
 import json
 import os
@@ -114,13 +115,23 @@ def _parse_iso(value: str) -> datetime:
 def _copy_record(record: "MemoryRecord") -> "MemoryRecord":
     """An independent copy of a record.
 
-    Every field but ``tags`` is an immutable scalar (str / float),
-    so a dataclass copy carrying a fresh tags list shares nothing
-    mutable with the original: in-place edits to one can never be
-    observed through the other. Used for the file store's
-    committed snapshot (see ``JsonFileStore._publish_committed``).
+    The schema types every field but ``tags`` as an immutable
+    scalar (str / float) — but import admits whatever a store
+    file carries (``from_dict`` is unchecked), and an imported
+    record with a list-valued ``source`` shared that one list
+    between the working copy and the committed snapshot: an
+    in-place edit during another thread's batch leaked into the
+    committed view and silently broke the committed copy's own
+    seal, so recall excluded the record for the batch's duration
+    (Linear fifth look, Nov 21, 2026). The copy therefore
+    deep-copies the whole record: it shares NO mutable state
+    with the original, whatever the fields carry, so in-place
+    edits to one can never be observed through the other.
+    Records are small; the depth costs nothing that matters.
+    Used for the file store's committed snapshot (see
+    ``JsonFileStore._publish_committed``).
     """
-    return replace(record, tags=list(record.tags))
+    return copy.deepcopy(record)
 
 
 # ---------------------------------------------------------------------------
