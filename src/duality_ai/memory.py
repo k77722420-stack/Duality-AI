@@ -1030,6 +1030,17 @@ class MemoryCloud:
                 if persist is not None:
                     persist(record)
             self._reseal_chain()
+            # The reseal rewrote the stored summaries' chain links,
+            # so the copies captured from remember() above carry
+            # PRE-reseal provenance — obsolete the moment the pass
+            # finishes (Linear seventh look, Nov 22, 2026). What
+            # crosses the boundary is a copy of the FINAL stored
+            # record: the same isolation as every other return,
+            # with the chain links the store actually attests to.
+            created = [
+                _copy_record(self.store.get(summary.id))
+                for summary in created
+            ]
         return created
 
     # -- forgetting --------------------------------------------------------

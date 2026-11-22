@@ -147,30 +147,48 @@ def test_consolidation_final_write_failure_leaves_file_untouched(
 def test_consolidation_mid_reseal_failure_leaves_file_untouched(
     tmp_path, monkeypatch
 ):
-    """The pass dies partway through its own hash recomputation —
-    the mid-reseal case. Nothing was committed, so the file is
-    the pre-pass file, byte for byte."""
+    """The pass dies partway through the reseal itself — the
+    mid-reseal case. Nothing was committed, so the file is the
+    pre-pass file, byte for byte.
+
+    The fault is armed only once the pass ENTERS the reseal, and
+    fires after at least one reseal-phase hash recomputation has
+    completed (Linear seventh look, Nov 22, 2026: the first
+    version of this test counted hash calls from the start of
+    the pass, so its fault in fact fired during the preflight
+    chain verification, before summary creation, marking, or
+    resealing — it proved rollback of a preflight failure, not
+    of a mid-reseal one)."""
     path = tmp_path / "memory.json"
     cloud = _seed_episodes(path)
     before = path.read_bytes()
 
-    original = MemoryRecord.compute_hash
-    calls = {"n": 0}
-    armed = {"on": True}
+    original_reseal = MemoryCloud._reseal_chain
+    state = {"entered": False, "armed_hashes": 0}
+
+    def reseal_spy(self):
+        state["entered"] = True
+        return original_reseal(self)
+
+    original_hash = MemoryRecord.compute_hash
 
     def flaky_hash(self):
-        if armed["on"]:
-            calls["n"] += 1
-            if calls["n"] >= 3:
+        if state["entered"]:
+            state["armed_hashes"] += 1
+            if state["armed_hashes"] >= 2:
                 raise RuntimeError("injected mid-reseal failure")
-        return original(self)
+        return original_hash(self)
 
+    monkeypatch.setattr(MemoryCloud, "_reseal_chain", reseal_spy)
     monkeypatch.setattr(MemoryRecord, "compute_hash", flaky_hash)
     with pytest.raises(RuntimeError):
         cloud.consolidate(created_at=T0)
-    armed["on"] = False  # the verification below hashes honestly
 
-    assert calls["n"] >= 3  # the failure fired inside the pass
+    # The fault fired where the test's name says: inside the
+    # reseal, after at least one reseal-phase recomputation.
+    assert state["entered"] is True
+    assert state["armed_hashes"] >= 2
+    state["entered"] = False  # the verification below hashes honestly
     assert path.read_bytes() == before
     reopened = _fresh_cloud(path)
     assert len(reopened.store.all()) == 3

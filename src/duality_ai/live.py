@@ -39,6 +39,12 @@ Three further rules (review findings 1, 2 and 3, Nov 13, 2026):
   gate judges: its detected signals join the union the gate sees,
   and the leniency content condition must hold for the output too —
   a selected answer that itself performs earns no context.
+  The inspection is the door's own (Linear seventh look,
+  Nov 22, 2026): the selected text is judged through the shared
+  decoding walk (``inspection.py``), not scanned raw, so an answer
+  encoded as JSON is judged on its decoded strings — the same
+  representation the memory door would judge after the fact. An
+  output that cannot be fully inspected fails the step closed.
 """
 
 from __future__ import annotations
@@ -46,6 +52,11 @@ from __future__ import annotations
 from pathlib import Path
 
 from .base import BaseLayer
+from .inspection import (
+    UninspectableContentError,
+    judged_performs,
+    judged_signals,
+)
 from .markers import detect_signals, live_labels, performs
 from .model import ModelClient
 from .morality import MoralityGate
@@ -371,11 +382,33 @@ class LivePipeline:
             # leniency's content condition must hold for the output
             # as well as the request: a selected answer that itself
             # performs earns no context.
-            for signal in detect_signals(chosen_text):
+            #
+            # The judgment is the DOOR's judgment, not a raw scan
+            # (Linear seventh look, Nov 22, 2026): the first version
+            # of this inspection read the selected text raw, while
+            # the door decodes JSON before judging — so an answer
+            # encoded as JSON, an escaped letter deep, passed the
+            # gate and was caught only at the door, after release.
+            # Both surfaces now use the shared inspection
+            # (inspection.py): the same decoding walk, the same
+            # union, the same performs question, asked of the
+            # decoded strings. An output the walk cannot fully
+            # inspect is a format failure — the step fails closed
+            # rather than releasing unjudged text.
+            try:
+                output_signals = judged_signals(chosen_text)
+                output_performs = judged_performs(chosen_text)
+            except UninspectableContentError as error:
+                raise _FormatFailure(
+                    "the selected framing's text cannot be fully "
+                    f"inspected ({error}); the step does not "
+                    "release unjudged content."
+                ) from error
+            for signal in output_signals:
                 if signal not in signals:
                     signals.append(signal)
             signals.sort()
-            if performs(chosen_text):
+            if output_performs:
                 contexts = []
 
         return {
@@ -434,7 +467,10 @@ class LivePipeline:
             {"stage": "creative_hemisphere", "output": creative_out}
         )
 
-        proposal = self._merge(request, logical_out, creative_out)
+        try:
+            proposal = self._merge(request, logical_out, creative_out)
+        except _FormatFailure as failure:
+            return self._fail_closed(request, stages, "hub", failure)
         stages.append({"stage": "hub", "output": proposal})
 
         decision, reasons = self.gate.evaluate(proposal)
