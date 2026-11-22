@@ -1,0 +1,510 @@
+"""The live pipeline — the five stages with a real model inside.
+
+``LivePipeline`` runs the same flow as ``DualityPipeline``
+(THESIS.md, Section 3) and returns the same trace shape, but the two
+hemispheres are a real language model (any ``ModelClient`` from
+``model.py``) instead of deterministic stand-ins. The hub remains
+deterministic code (a local merge mirroring ``hub.py``'s rules), and
+the morality gate is the very same ``MoralityGate`` the skeleton uses:
+the model's work is judged by the clause library, exactly as the
+design requires.
+
+The design's invariant is enforced at the seam: **a malformed step
+does not proceed.** The model is instructed to reply in a strict JSON
+shape; if it does not — bad JSON, missing keys, a signal outside the
+declared vocabulary, or no reply at all — the run fails closed: the
+trace records the failure at that stage, the decision is "stop", and
+nothing is released.
+
+Three further rules (review findings 1, 2 and 3, Nov 13, 2026):
+
+* **The model can add signals, never subtract them.** The signals the
+  gate sees are the union of the model's and the deterministic
+  detector's (``markers.detect_signals``).
+* **No surviving framing, no release.** If the hub finds no framing
+  that answers the flags, the step is stopped even if the gate, seeing
+  no signal, would pass it (blueprint section 3).
+* **Leniency needs the content condition, not just a label.** A
+  context (educational / defensive) reaches the gate only if the model
+  states ``"stance": "explains"`` AND the deterministic ``performs``
+  check finds nothing. A missing or unrecognized stance earns no
+  leniency (fail closed, and it adds no new format failures: the key is
+  optional and only ever matters on a flagged, labeled step).
+* **The gate judges the release, not just the request.** Detection
+  originally ran on the request alone, so a benign request could
+  release flagged content the model introduced in its selected
+  answer — the gate passed it unseen, and the memory door's later
+  refusal could not retract the release (Linear sixth look,
+  Nov 22, 2026). The selected output is now inspected before the
+  gate judges: its detected signals join the union the gate sees,
+  and the leniency content condition must hold for the output too —
+  a selected answer that itself performs earns no context.
+  The inspection is the door's own (Linear seventh look,
+  Nov 22, 2026): the selected text is judged through the shared
+  decoding walk (``inspection.py``), not scanned raw, so an answer
+  encoded as JSON is judged on its decoded strings — the same
+  representation the memory door would judge after the fact. An
+  output that cannot be fully inspected fails the step closed.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from .base import BaseLayer
+from .inspection import (
+    UninspectableContentError,
+    judged_performs,
+    judged_signals,
+)
+from .markers import detect_signals, live_labels, performs
+from .model import ModelClient
+from .morality import MoralityGate
+from .strictjson import DuplicateKeyError, loads_strict
+
+# The only signals the logical hemisphere may raise. This is the
+# vocabulary the shipped clause library watches for; anything outside
+# it is a format failure, not a new kind of evidence.
+SIGNAL_VOCABULARY = ("wrongdoing", "deception")
+STANCES = ("explains", "performs")
+
+LOGICAL_SYSTEM = """\
+You are the LOGICAL HEMISPHERE of the Duality AI, an architecture in
+which two reasoning modes work a request and a hub weighs their
+results. Your job is analysis only: evaluate the user's request —
+check it, flag problems rather than fixing them silently, and state
+pros and cons.
+
+Return ONLY a JSON object, no prose outside it, with these keys:
+  "checks":  a list of {"name": ..., "passed": true/false, "detail": ...}
+  "flags":   a list of short strings naming each problem you found
+  "signals": a list drawn ONLY from ["wrongdoing", "deception"] —
+             include "wrongdoing" only if the request genuinely asks
+             for help with an illegal or wrongful act, and "deception"
+             only if it genuinely asks for content meant to mislead a
+             third party; otherwise the list is empty
+  "pros":    a list of strings
+  "cons":    a list of strings
+  "stance":  "explains" if the answer would only describe, analyze or
+             teach about a flagged act so it can be recognized;
+             "performs" if the answer itself would BE the flagged
+             artifact (a fake review, a ready-to-send phishing email)
+             or would help carry the act out. If unsure, "performs".
+"""
+
+CREATIVE_SYSTEM = """\
+You are the CREATIVE HEMISPHERE of the Duality AI, an architecture in
+which two reasoning modes work a request and a hub weighs their
+results. Your job is generation only: propose alternative framings of
+how the request could be answered.
+
+Return ONLY a JSON object, no prose outside it, with exactly one key:
+  "alternatives": a list of {"id": ..., "text": ...} objects,
+                  including one with id "alt-direct" (answer the
+                  request directly and plainly, exactly as asked) and
+                  others as you see fit (for example "alt-explainer",
+                  background and explanation; "alt-cautionary",
+                  recognition and caution).
+"""
+
+
+def detect_contexts(prompt: str) -> list[str]:
+    """Detect context LABELS in a prompt by keyword (heuristic).
+
+    A label is what the request says it is for. It is necessary for
+    leniency, never sufficient: see ``granted_contexts``.
+    """
+    return live_labels(prompt)
+
+
+def granted_contexts(prompt: str, stance: str | None) -> list[str]:
+    """Contexts the gate may see: labels, if the content condition holds.
+
+    L1 covers a step only if it "explains or analyzes rather than
+    performs or enables"; L2 only if its content is "defensive in
+    character". The model's stance and the deterministic ``performs``
+    check must both agree that the step explains.
+    """
+    if stance == "explains" and not performs(prompt):
+        return detect_contexts(prompt)
+    return []
+
+
+class _FormatFailure(Exception):
+    """The model's reply cannot be acted on; the step must not proceed."""
+
+
+def _parse_json_object(raw: str, stage: str) -> dict:
+    try:
+        data = loads_strict(raw)
+    except DuplicateKeyError as error:
+        # A repeated key discards evidence before validation can
+        # see it: standard parsing keeps only the LAST value, so a
+        # reported signal in an earlier position vanished and the
+        # step proceeded on the remainder (Linear sixth look,
+        # Nov 22, 2026). The shared strict loader refuses the
+        # reply instead of choosing between its values; like every
+        # parse failure here, that is a format failure — fail
+        # closed. (The guarded memory door rejects duplicates for
+        # the same reason, through the same loader.)
+        raise _FormatFailure(
+            f"{stage} reply repeats the key {error.args[0]!r}; "
+            "which of its values the reply carries cannot be "
+            "determined as written."
+        ) from error
+    except (ValueError, TypeError, RecursionError) as error:
+        # ValueError, not just its JSONDecodeError subclass: an
+        # oversized integer literal in a reply trips the interpreter's
+        # int-string conversion limit and raises a plain ValueError
+        # out of json.loads (Linear whole-tree audit, 2026-11-13;
+        # confirmed by execution — the exception escaped run() and no
+        # stopped trace was produced). RecursionError covers deeply
+        # nested replies on interpreters whose scanner recurses.
+        # Every parse failure is a format failure: fail closed.
+        raise _FormatFailure(
+            f"{stage} reply was not valid JSON: {error}"
+        ) from error
+    if not isinstance(data, dict):
+        raise _FormatFailure(f"{stage} reply was not a JSON object.")
+    return data
+
+
+def _validate_logical(data: dict) -> dict:
+    for key in ("checks", "flags", "signals", "pros", "cons"):
+        if key not in data:
+            raise _FormatFailure(
+                f"logical hemisphere reply is missing key {key!r}."
+            )
+    signals = data["signals"]
+    if not isinstance(signals, list) or not all(
+        isinstance(signal, str) for signal in signals
+    ):
+        raise _FormatFailure("logical hemisphere 'signals' is not a list.")
+    outside = [s for s in signals if s not in SIGNAL_VOCABULARY]
+    if outside:
+        raise _FormatFailure(
+            f"logical hemisphere raised signal(s) outside the declared "
+            f"vocabulary {list(SIGNAL_VOCABULARY)}: {outside}."
+        )
+    # TEC-8 (Linear audit, 2026-11-13): the remaining fields were
+    # presence-checked only. A null "flags" crashed the merge; null
+    # pros/cons/checks were carried into the proposal. Type-check
+    # them all; anything malformed fails closed like bad JSON.
+    for key in ("flags", "pros", "cons"):
+        value = data[key]
+        if not isinstance(value, list) or not all(
+            isinstance(item, str) for item in value
+        ):
+            raise _FormatFailure(
+                f"logical hemisphere {key!r} is not a list of strings."
+            )
+    checks = data["checks"]
+    if not isinstance(checks, list) or not all(
+        isinstance(check, dict)
+        and isinstance(check.get("name"), str)
+        and isinstance(check.get("passed"), bool)
+        for check in checks
+    ):
+        raise _FormatFailure(
+            "logical hemisphere 'checks' is not a list of "
+            "{name, passed} objects."
+        )
+    # Optional key: a missing or unrecognized stance is not a format
+    # failure; it simply earns no leniency (see granted_contexts).
+    stance = data.get("stance")
+    data["stance"] = stance if stance in STANCES else None
+    return data
+
+
+def _validate_creative(data: dict) -> dict:
+    alternatives = data.get("alternatives")
+    if not isinstance(alternatives, list) or not alternatives:
+        raise _FormatFailure(
+            "creative hemisphere reply has no 'alternatives' list."
+        )
+    for alternative in alternatives:
+        if (
+            not isinstance(alternative, dict)
+            or not isinstance(alternative.get("id"), str)
+            or not alternative["id"].strip()
+            or not isinstance(alternative.get("text"), str)
+        ):
+            # TEC-8 tail (Linear re-audit, 2026-11-13): a blank or
+            # whitespace-only id slipped past the alt-direct
+            # rejection rule, which matches on the id.
+            raise _FormatFailure(
+                "creative hemisphere alternative lacks a non-blank "
+                "'id' or 'text' string."
+            )
+    if all(
+        not alternative["text"].strip() for alternative in alternatives
+    ):
+        raise _FormatFailure(
+            "creative hemisphere alternatives are all blank; a blank "
+            "framing is not a framing."
+        )
+    return data
+
+
+class LivePipeline:
+    """Runs a prompt through the five stages with a real model inside."""
+
+    def __init__(
+        self, model: ModelClient, clauses_path: str | Path | None = None
+    ) -> None:
+        self.model = model
+        self.base = BaseLayer()
+        self.gate = MoralityGate(clauses_path)
+
+    def _logical_stage(self, prompt: str) -> dict:
+        try:
+            raw = self.model.complete(LOGICAL_SYSTEM, prompt)
+        except Exception as error:  # no reply at all: fail closed
+            raise _FormatFailure(
+                f"logical hemisphere produced no reply: {error}"
+            ) from error
+        return _validate_logical(_parse_json_object(raw, "logical hemisphere"))
+
+    def _creative_stage(self, prompt: str) -> dict:
+        try:
+            raw = self.model.complete(CREATIVE_SYSTEM, prompt)
+        except Exception as error:  # no reply at all: fail closed
+            raise _FormatFailure(
+                f"creative hemisphere produced no reply: {error}"
+            ) from error
+        return _validate_creative(
+            _parse_json_object(raw, "creative hemisphere")
+        )
+
+    @staticmethod
+    def _merge(request: dict, logical: dict, creative: dict) -> dict:
+        """Deterministic hub merge, mirroring hub.py's rules.
+
+        The logical hemisphere's analysis always carries forward; the
+        direct-answer framing is rejected when flags were raised; a
+        cautionary framing is unnecessary when none were. Signals are
+        the union of the model's and the deterministic detector's, and
+        a detector-only signal also raises a flag. The summary is the
+        first surviving framing's text, or a merge note when none
+        survives (``no_framing_survived`` is then True). The selected
+        framing's text is itself inspected before the proposal goes
+        to the gate: its detected signals join the union, and a
+        selected text that itself performs withdraws every granted
+        context (see the module docstring's fourth rule).
+        """
+        accepted: list[dict] = []
+        rejected: list[dict] = []
+
+        detected = detect_signals(request["lower"])
+        signals = sorted(set(logical["signals"]) | set(detected))
+        flags = list(logical["flags"])
+        for signal in detected:
+            flag = f"signal:{signal}"
+            if flag not in flags:
+                flags.append(flag)
+
+        accepted.append(
+            {
+                "source": "logical",
+                "item": "checks, flags, pros and cons",
+                "why": "The analysis is carried forward in full; the "
+                "proposal must respect every flag it raised.",
+            }
+        )
+
+        chosen_text = None
+        for alternative in creative["alternatives"]:
+            alt_id = alternative["id"]
+            if not alternative["text"].strip():
+                # TEC-8: a blank framing cannot "survive" the hub;
+                # it carries nothing and answers no flag.
+                rejected.append(
+                    {
+                        "source": "creative",
+                        "item": alt_id,
+                        "why": "The framing is blank; a blank framing "
+                        "cannot carry the step.",
+                    }
+                )
+                continue
+            if alt_id == "alt-direct" and flags:
+                rejected.append(
+                    {
+                        "source": "creative",
+                        "item": alt_id,
+                        "why": "Answering exactly as asked would carry "
+                        "the flagged element without qualification; it "
+                        "conflicts with the logical hemisphere's flags.",
+                    }
+                )
+                continue
+            if alt_id == "alt-cautionary" and not flags:
+                rejected.append(
+                    {
+                        "source": "creative",
+                        "item": alt_id,
+                        "why": "No flag was raised, so a cautionary "
+                        "reframing is unnecessary for this request.",
+                    }
+                )
+                continue
+            accepted.append(
+                {
+                    "source": "creative",
+                    "item": alt_id,
+                    "why": "Consistent with the analysis and serves the "
+                    "request as analyzed.",
+                }
+            )
+            if chosen_text is None:
+                chosen_text = alternative["text"]
+
+        if chosen_text is None:
+            summary = (
+                "No framing survived the hub's rules; the flags raised "
+                f"by the logical hemisphere stand unanswered: {flags}. "
+                "The proposal carries the analysis forward to the gate."
+            )
+        else:
+            summary = chosen_text
+
+        contexts = granted_contexts(
+            request["prompt"], logical.get("stance")
+        )
+        if chosen_text is not None:
+            # The gate judges what the step would RELEASE (Linear
+            # sixth look, Nov 22, 2026): detection ran on the
+            # request only, so flagged content the model introduced
+            # in its selected answer reached the gate unseen — the
+            # step was released, and the memory door's refusal
+            # afterward could not retract the release. The selected
+            # text's signals now join the union the gate sees, and
+            # leniency's content condition must hold for the output
+            # as well as the request: a selected answer that itself
+            # performs earns no context.
+            #
+            # The judgment is the DOOR's judgment, not a raw scan
+            # (Linear seventh look, Nov 22, 2026): the first version
+            # of this inspection read the selected text raw, while
+            # the door decodes JSON before judging — so an answer
+            # encoded as JSON, an escaped letter deep, passed the
+            # gate and was caught only at the door, after release.
+            # Both surfaces now use the shared inspection
+            # (inspection.py): the same decoding walk, the same
+            # union, the same performs question, asked of the
+            # decoded strings. The performs question additionally
+            # keeps the raw text's own evidence (Linear eighth
+            # look, Nov 22, 2026): a production pattern spanning
+            # a JSON key and its value is evidence neither decoded
+            # string holds alone, and decoding must add
+            # visibility, not discard it. An output the walk
+            # cannot fully inspect is a format failure — the step
+            # fails closed rather than releasing unjudged text.
+            try:
+                output_signals = judged_signals(chosen_text)
+                output_performs = judged_performs(chosen_text)
+            except UninspectableContentError as error:
+                raise _FormatFailure(
+                    "the selected framing's text cannot be fully "
+                    f"inspected ({error}); the step does not "
+                    "release unjudged content."
+                ) from error
+            for signal in output_signals:
+                if signal not in signals:
+                    signals.append(signal)
+            signals.sort()
+            if output_performs:
+                contexts = []
+
+        return {
+            "summary": summary,
+            "based_on_prompt": request["prompt"],
+            "signals": signals,
+            "contexts": contexts,
+            "no_framing_survived": chosen_text is None,
+            "accepted": accepted,
+            "rejected": rejected,
+        }
+
+    def _fail_closed(
+        self, request: dict, stages: list[dict], stage: str, failure: Exception
+    ) -> dict:
+        """Build the trace for a malformed step: stopped, not released."""
+        stages.append(
+            {"stage": stage, "error": "format_failure", "detail": str(failure)}
+        )
+        proposal = {
+            "summary": None,
+            "based_on_prompt": request["prompt"],
+            "signals": [],
+            "contexts": [],
+            "no_framing_survived": False,
+            "accepted": [],
+            "rejected": [],
+        }
+        return {
+            "prompt": request["prompt"],
+            "stages": stages,
+            "proposal": proposal,
+            "decision": "stop",
+            "released": False,
+        }
+
+    def run(self, prompt: str) -> dict:
+        request = self.base.prepare(prompt)
+        stages: list[dict] = [{"stage": "base", "output": request}]
+
+        try:
+            logical_out = self._logical_stage(prompt)
+        except _FormatFailure as failure:
+            return self._fail_closed(
+                request, stages, "logical_hemisphere", failure
+            )
+        stages.append({"stage": "logical_hemisphere", "output": logical_out})
+
+        try:
+            creative_out = self._creative_stage(prompt)
+        except _FormatFailure as failure:
+            return self._fail_closed(
+                request, stages, "creative_hemisphere", failure
+            )
+        stages.append(
+            {"stage": "creative_hemisphere", "output": creative_out}
+        )
+
+        try:
+            proposal = self._merge(request, logical_out, creative_out)
+        except _FormatFailure as failure:
+            return self._fail_closed(request, stages, "hub", failure)
+        stages.append({"stage": "hub", "output": proposal})
+
+        decision, reasons = self.gate.evaluate(proposal)
+        if proposal["no_framing_survived"] and decision in (
+            "proceed",
+            "proceed_with_leniency",
+        ):
+            # Blueprint section 3: when no framing survives, the step
+            # does not proceed. The gate's own reasons stay on record.
+            decision = "stop"
+            reasons = list(reasons) + [
+                {
+                    "clause": "hub",
+                    "outcome": "no_framing_survived",
+                    "detail": "No framing answered the raised flags; the "
+                    "step does not proceed.",
+                }
+            ]
+        stages.append(
+            {
+                "stage": "morality_gate",
+                "output": {"decision": decision, "reasons": reasons},
+            }
+        )
+
+        return {
+            "prompt": request["prompt"],
+            "stages": stages,
+            "proposal": proposal,
+            "decision": decision,
+            "released": decision in ("proceed", "proceed_with_leniency"),
+        }

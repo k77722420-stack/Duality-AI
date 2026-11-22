@@ -9,5 +9,6 @@ it is not production software. See DISCLAIMER.md.
 """
 
 from .pipeline import DualityPipeline
+from .system import DualitySystem
 
-__all__ = ["DualityPipeline"]
+__all__ = ["DualityPipeline", "DualitySystem"]

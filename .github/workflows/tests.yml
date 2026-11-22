@@ -1,0 +1,23 @@
+name: tests
+
+# The suite's count has rested on the builder's local runs through
+# six audit rounds, with the auditor noting — fairly — that they
+# never executed it independently. From Nov 22, 2026 the count is
+# reproduced on GitHub's machines on every push and pull request:
+# evidence neither the builder nor the auditor produced.
+on:
+  push:
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install pytest
+        run: python -m pip install pytest
+      - name: Run the suite
+        run: python -m pytest -q
