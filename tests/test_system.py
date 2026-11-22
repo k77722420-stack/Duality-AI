@@ -140,16 +140,22 @@ def test_leniency_step_proceeds_and_the_leniency_is_on_record():
     ]
     assert "engaged_but_lenient" in outcomes
 
-    # The step's one hard signal still sized the barrier's response,
-    # and the episode met the same strict door as the stopped step's:
-    # leniency belongs to steps, not to memory writes.
+    # The step's one hard signal still sized the barrier's response.
+    # The episode is now WRITTEN: the author's call on Finding F-S1
+    # (Ken, Nov 22, 2026) — the door verifies a pipeline episode
+    # against its step's recorded gate judgment, so a step passed
+    # with leniency on record is remembered, leniency included.
+    # (This assertion replaces the pre-F-S1 posture, under which
+    # leniency belonged to steps and never to memory writes.)
     assert result["barrier"]["threat_units"] == 1
     assert result["barrier"]["stand_down"] == {
         "decoded": 2,
         "population": 4,
     }
-    assert result["episode"]["written"] is False
-    assert result["episode"]["write_judgment"]["decision"] == "stop"
+    assert result["episode"]["written"] is True
+    assert result["episode"]["write_judgment"]["decision"] == (
+        "proceed_with_leniency"
+    )
 
 
 # -- the loop closes: history becomes knowledge becomes input -----------

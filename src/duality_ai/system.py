@@ -54,6 +54,24 @@ The seams, carried over from the demo and labeled, not hidden:
      until he makes it the door's strictness wins and the tension is
      surfaced in every affected run's trace.
 
+     THE AUTHOR'S CALL (Ken, Nov 22, 2026 — the TEC-12 decision and
+     the F-S1 direction): the door's strictness yields to the gate's
+     RECORDED judgment for pipeline episodes. An episode payload
+     carries its own step's gate decision and reasons; the door now
+     verifies the write against that record — a step the gate passed
+     with leniency, its cover recorded in the reasons, is admitted
+     when the payload's own sections carry no signal the gate did
+     not judge, and a stopped step's record is kept as a metadata-
+     only stop record (the TEC-12 build). The recalled section of a
+     payload quotes records the door already admitted and is not
+     re-judged as this step's content. Every other write — and any
+     episode whose content outruns its recorded judgment — is still
+     judged blind, with no leniency, exactly as above. Finding F-S1
+     (sandbox run, Nov 22, 2026) is what forced the question: the
+     strict door refused the episode of a step the gate had passed
+     with recorded leniency, so the system could not remember its
+     own leniency decisions.
+
 Nothing here reasons, defends, or remembers for real: the hemispheres
 are the same deterministic stand-ins (or, with ``model=``, the live
 pipeline over a caller-supplied model client), the barrier is the
@@ -72,7 +90,7 @@ from .markers import detect_signals
 from .memory import MemoryCloud, MemoryStore
 from .model import ModelClient
 from .pipeline import DualityPipeline
-from .strictjson import DuplicateKeyError, reject_duplicate_keys
+from .strictjson import DuplicateKeyError, loads_strict, reject_duplicate_keys
 from .inspection import (
     UninspectableContentError as _UninspectableContentError,
     content_texts as _content_texts,
@@ -273,7 +291,23 @@ class DualitySystem:
         seam 3). The judgment is kept on ``last_write_judgment`` so
         the caller can see WHY a write was refused. The write
         proceeds only on a releasing decision.
+
+        One exception, the author's call recorded at seam 3 (F-S1,
+        Nov 22, 2026): a pipeline EPISODE carries its own step's
+        recorded gate judgment, and the door first verifies the
+        write against that record — a step the gate passed, with
+        any leniency cover on record, is admitted when the
+        payload's own sections carry no signal the gate did not
+        judge. Anything the record does not decide falls through
+        to the blind judgment below, unchanged.
         """
+        recorded = self._recorded_step_judgment(record)
+        if recorded is not None:
+            verdict = self._judge_episode_against_record(
+                record, recorded
+            )
+            if verdict is not None:
+                return verdict
         try:
             signals = _judged_signals(record.content)
         except _UninspectableContentError as error:
@@ -309,6 +343,134 @@ class DualitySystem:
             "reasons": reasons,
         }
         return decision in _RELEASED
+
+    @staticmethod
+    def _recorded_step_judgment(record):
+        """The gate judgment a pipeline episode carries about its own
+        step, or None when the record is not such an episode.
+
+        Only a releasing judgment is returned: a stopped step's
+        episode keeps the blind judgment (and its refusal), exactly
+        as before — the recorded-judgment path exists to honor what
+        the gate PASSED, never to soften what it stopped.
+        """
+        if record.kind != "episodic" or record.source != "pipeline":
+            return None
+        try:
+            payload = loads_strict(record.content)
+        except (ValueError, TypeError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        gate = payload.get("gate")
+        if not isinstance(gate, dict):
+            return None
+        decision = gate.get("decision")
+        reasons = gate.get("reasons")
+        if decision not in _RELEASED or not isinstance(reasons, list):
+            return None
+        hub = payload.get("hub")
+        judged: list[str] = []
+        if isinstance(hub, dict):
+            signals = hub.get("signals")
+            if isinstance(signals, list):
+                judged = [s for s in signals if isinstance(s, str)]
+        return {
+            "decision": decision,
+            "reasons": reasons,
+            "judged_signals": sorted(set(judged)),
+            "payload": payload,
+        }
+
+    def _judge_episode_against_record(self, record, recorded):
+        """Verify an episode write against its step's recorded gate
+        judgment (F-S1). Returns True when the record admits the
+        write, False when the write is uninspectable, or None when
+        the record does not decide it — the blind judgment then
+        applies, and refuses whatever outruns the record.
+
+        The payload's ``recalled`` section quotes records the door
+        already admitted; it is history, not this step's content,
+        and is not re-judged. The step's OWN sections (prompt,
+        hemispheres, hub, gate, answer) are judged: a plain pass
+        must carry no signal at all (the gate judged none), and a
+        leniency pass must carry only signals the gate judged,
+        under a leniency cover actually recorded in its reasons —
+        claimed leniency without the record decides nothing.
+        """
+        payload = recorded["payload"]
+        own = {
+            key: value
+            for key, value in payload.items()
+            if key != "recalled"
+        }
+        try:
+            own_signals = _judged_signals(
+                json.dumps(own, sort_keys=True)
+            )
+        except _UninspectableContentError as error:
+            self.last_write_judgment = {
+                "record_id": record.id,
+                "decision": "stop",
+                "reasons": [
+                    {
+                        "clause": "guarded-door",
+                        "outcome": "uninspectable_content",
+                        "detail": (
+                            "The write's content exceeds the door's "
+                            f"inspection budget ({error}); the write "
+                            "is refused rather than passed unjudged."
+                        ),
+                    }
+                ],
+            }
+            return False
+        if recorded["decision"] == "proceed":
+            if own_signals:
+                return None
+            basis = (
+                "the gate passed this step (proceed) and the "
+                "payload's own sections carry no signal"
+            )
+        else:  # proceed_with_leniency
+            cover = next(
+                (
+                    reason
+                    for reason in recorded["reasons"]
+                    if isinstance(reason, dict)
+                    and reason.get("outcome") == "engaged_but_lenient"
+                ),
+                None,
+            )
+            if cover is None:
+                return None
+            if not set(own_signals) <= set(recorded["judged_signals"]):
+                return None
+            basis = (
+                "the gate passed this step with leniency "
+                f"({cover.get('clause')} recorded as "
+                "engaged_but_lenient) and the payload's own "
+                f"signals {own_signals} are within the judged "
+                f"set {recorded['judged_signals']}"
+            )
+        self.last_write_judgment = {
+            "record_id": record.id,
+            "decision": recorded["decision"],
+            "reasons": [
+                {
+                    "clause": "guarded-door",
+                    "outcome": "recorded_judgment_honored",
+                    "detail": (
+                        "The write is verified against the step's "
+                        f"recorded gate judgment: {basis}. The "
+                        "recalled section, which quotes records "
+                        "already admitted, is not re-judged as this "
+                        "step's content."
+                    ),
+                }
+            ],
+        }
+        return True
 
     # -- movement 2: recall, per shelf ---------------------------------
 
