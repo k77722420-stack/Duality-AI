@@ -95,3 +95,47 @@ Ken's direction.
 Built on branch `duality-fs1-door-leniency-2026-11-22` off the
 merged main (`65a1025`). Awaiting Linear's verdict, per the
 standing gates; nothing merges without it and Ken's word.
+
+---
+
+## Addendum — Tenth look: HOLD, and the fix (Nov 22, 2026)
+
+Linear's tenth look HELD the branch at `1c6005b`: the
+recorded-judgment path trusted caller-authored payloads — a
+forged plain pass could hide flagged content under the excluded
+`recalled` key, and a forged leniency record needed only any
+`engaged_but_lenient` reason (a `blocks` reason could accompany
+it) — and a deeply nested payload could raise `RecursionError`
+past the new preliminary parse. Lux verified by execution:
+both forgery repros admitted exactly as derived; the recursion
+escape reproduces in this interpreter at ~10,000 nesting levels
+(Linear's 2,000 figure is refused cleanly here — the failure
+mode, not the depth, was the finding).
+
+**The fix (Ken: "Engage — fix both findings"):**
+
+- **Authorization is out-of-band.** `run()` registers the SHA-256
+  digest of the exact episode content it constructs;
+  `_judge_write` reaches the recorded-judgment path only for a
+  registered digest, consumed by the one write it authorizes.
+  Caller-authored payloads — however complete, whatever they set
+  `source` to — are judged blind. A replay of a genuine episode's
+  exact content is likewise a new write and is refused.
+- **Consistency hardening:** a leniency record carrying any
+  `blocks` reason decides nothing (the gate never records both).
+- **Recursion guard:** parser recursion in the preliminary parse
+  falls through to the blind judgment, which records it as an
+  uninspectable-content refusal; `loads_strict`'s call site also
+  catches `RecursionError` directly.
+- **Tests:** 7 new in `tests/test_fs1_tenth_look_fixes.py`,
+  including the verdict's two repros, a fully self-consistent
+  forgery (refused), the genuine run (still admitted), the
+  replay (refused), and the deep-nesting regression at both
+  depths. No existing test changed. **Suite: 253 passed.**
+- **KNOWN-LIMITATIONS entry 17 is RETIRED by this change** —
+  removed under the document's own maintenance rule, its stated
+  retirement path ("the gate's judgment reaching the door
+  out-of-band from the run that produced it") now built.
+
+Awaiting Linear's eleventh look; nothing merges without it and
+Ken's word.

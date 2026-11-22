@@ -391,37 +391,6 @@ guarded door is the natural place — whose readings are unioned
 with the first, or by a real model's judgment admitted as a signal
 source at a surface, with the union rule stated in the open.
 
----
-
-## 17. The door verifies an episode's recorded judgment for consistency, not authenticity
-
-The F-S1 rule (Nov 22, 2026) lets the guarded door admit a pipeline
-episode whose own payload records that the gate passed its step —
-with leniency, when the cover is on record — provided the payload's
-own sections carry no signal the gate did not judge. Inside a live
-run that record is written by the system itself, in the same
-movement, and the verification is sound. But the door's hook judges
-any record handed to the cloud, and the verification checks the
-record's INTERNAL consistency — a real clause name, an
-`engaged_but_lenient` outcome, signal sets that agree — not its
-authenticity. A caller who hand-crafts an internally complete
-leniency record can get flagged text admitted as an "episode"; the
-door cannot tell a crafted record from a genuine one, because
-nothing in the payload is attested by the gate itself. The checks
-bound the forgery (it must be complete and self-consistent, and
-any signal beyond the recorded judged set is still refused), but
-they do not prevent it.
-
-**Where it lives:** `src/duality_ai/system.py`
-(`_recorded_step_judgment`, `_judge_episode_against_record`).
-**Retired by:** the gate's judgment reaching the door out-of-band
-from the run that produced it, or the system attesting episode
-payloads in a way a payload cannot self-assert — either makes the
-record's origin, not only its consistency, something the door
-checks.
-
----
-
 ## How this document is maintained
 
 An entry is removed only when the limitation is actually retired —

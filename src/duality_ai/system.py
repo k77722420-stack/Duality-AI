@@ -81,6 +81,7 @@ What is new is only that they now run as one system.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -276,6 +277,12 @@ class DualitySystem:
         )
         self.cloud.set_write_hook(self._judge_write)
         self.last_write_judgment: dict | None = None
+        # Digests of episode payloads THIS system has constructed in
+        # run() and not yet written — the door's out-of-band
+        # authorization for the recorded-judgment path (tenth-look
+        # fix, Nov 22, 2026). An entry is consumed by the write it
+        # authorizes; nothing else can register one.
+        self._episode_write_digests: set[str] = set()
         # Ids the most recent run's recall excluded because their
         # provenance seal did not verify (memory layer, recall()).
         self.last_recall_exclusions: list[str] = []
@@ -300,14 +307,29 @@ class DualitySystem:
         payload's own sections carry no signal the gate did not
         judge. Anything the record does not decide falls through
         to the blind judgment below, unchanged.
+
+        The exception is bound out-of-band (tenth-look fix, Nov 22,
+        2026): it applies only to a payload this system itself
+        constructed in ``run()`` and registered by digest,
+        consumed by the one write it authorizes. A caller-authored
+        payload — however complete its claimed record, whatever it
+        sets ``source`` to — never reaches the recorded-judgment
+        path; it is judged blind, like every other write. A parser
+        recursion failure in the preliminary parse likewise falls
+        through to the blind judgment, whose inspection records it
+        as an uninspectable-content refusal.
         """
-        recorded = self._recorded_step_judgment(record)
-        if recorded is not None:
-            verdict = self._judge_episode_against_record(
-                record, recorded
-            )
-            if verdict is not None:
-                return verdict
+        if self._consume_episode_authorization(record):
+            try:
+                recorded = self._recorded_step_judgment(record)
+                if recorded is not None:
+                    verdict = self._judge_episode_against_record(
+                        record, recorded
+                    )
+                    if verdict is not None:
+                        return verdict
+            except RecursionError:
+                pass
         try:
             signals = _judged_signals(record.content)
         except _UninspectableContentError as error:
@@ -344,6 +366,24 @@ class DualitySystem:
         }
         return decision in _RELEASED
 
+    def _consume_episode_authorization(self, record) -> bool:
+        """Whether this write is the one write of an episode payload
+        this system constructed in ``run()`` — the out-of-band
+        authorization for the recorded-judgment path. The digest is
+        consumed either way, so an authorization serves exactly one
+        write; a replayed payload is a fresh write and is judged
+        blind.
+        """
+        if record.kind != "episodic" or record.source != "pipeline":
+            return False
+        digest = hashlib.sha256(
+            record.content.encode("utf-8")
+        ).hexdigest()
+        if digest in self._episode_write_digests:
+            self._episode_write_digests.discard(digest)
+            return True
+        return False
+
     @staticmethod
     def _recorded_step_judgment(record):
         """The gate judgment a pipeline episode carries about its own
@@ -358,7 +398,7 @@ class DualitySystem:
             return None
         try:
             payload = loads_strict(record.content)
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, RecursionError):
             return None
         if not isinstance(payload, dict):
             return None
@@ -433,6 +473,15 @@ class DualitySystem:
                 "payload's own sections carry no signal"
             )
         else:  # proceed_with_leniency
+            # The gate never records a leniency pass alongside a
+            # blocking reason; a record claiming both is not the
+            # gate's record and decides nothing (tenth-look fix).
+            if any(
+                isinstance(reason, dict)
+                and reason.get("outcome") == "blocks"
+                for reason in recorded["reasons"]
+            ):
+                return None
             cover = next(
                 (
                     reason
@@ -625,9 +674,16 @@ class DualitySystem:
             ),
         }
         self.last_write_judgment = None
+        content = json.dumps(payload, sort_keys=True)
+        # Authorize THIS episode's write out-of-band: the door's
+        # recorded-judgment path applies only to a payload the
+        # system itself constructed, registered here, once.
+        self._episode_write_digests.add(
+            hashlib.sha256(content.encode("utf-8")).hexdigest()
+        )
         record = self.cloud.remember(
             kind="episodic",
-            content=json.dumps(payload, sort_keys=True),
+            content=content,
             source="pipeline",
             stage="post-gate",
             owner="shared",
