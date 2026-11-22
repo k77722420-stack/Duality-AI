@@ -240,6 +240,17 @@ def judged_performs(content: str) -> bool:
     judged as the raw text it is; anything the walk cannot fully
     inspect raises ``UninspectableContentError``, exactly as for
     signals.
+
+    The evidence is a UNION (Linear eighth look, Nov 22, 2026):
+    the decoded strings are walked first — the full inspection,
+    budget validation included, runs before any verdict — and
+    the raw text's own performing evidence is retained alongside
+    theirs. A production pattern can span a JSON key and its
+    value (``{"write":"a fake review..."}``): neither decoded
+    string performs alone, while the raw text does, and the
+    decoded-only check of the seventh look's fix discarded
+    evidence the previous raw check recognized. Decoding adds
+    visibility; it does not subtract it.
     """
     try:
         parsed = parse_for_inspection(content)
@@ -255,4 +266,7 @@ def judged_performs(content: str) -> bool:
             f"a syntax error ({error}); it cannot be fully "
             "inspected"
         ) from error
-    return any(performs(text) for text in content_texts(parsed))
+    texts = list(content_texts(parsed))
+    if performs(content):
+        return True
+    return any(performs(text) for text in texts)

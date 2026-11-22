@@ -392,9 +392,14 @@ class LivePipeline:
             # Both surfaces now use the shared inspection
             # (inspection.py): the same decoding walk, the same
             # union, the same performs question, asked of the
-            # decoded strings. An output the walk cannot fully
-            # inspect is a format failure — the step fails closed
-            # rather than releasing unjudged text.
+            # decoded strings. The performs question additionally
+            # keeps the raw text's own evidence (Linear eighth
+            # look, Nov 22, 2026): a production pattern spanning
+            # a JSON key and its value is evidence neither decoded
+            # string holds alone, and decoding must add
+            # visibility, not discard it. An output the walk
+            # cannot fully inspect is a format failure — the step
+            # fails closed rather than releasing unjudged text.
             try:
                 output_signals = judged_signals(chosen_text)
                 output_performs = judged_performs(chosen_text)
