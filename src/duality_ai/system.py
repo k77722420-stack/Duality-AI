@@ -72,6 +72,7 @@ from .markers import detect_signals
 from .memory import MemoryCloud, MemoryStore
 from .model import ModelClient
 from .pipeline import DualityPipeline
+from .strictjson import DuplicateKeyError, loads_strict, reject_duplicate_keys
 
 _RELEASED = ("proceed", "proceed_with_leniency")
 
@@ -201,34 +202,15 @@ class _UninspectableContentError(Exception):
     """
 
 
-class _DuplicateKeyError(Exception):
-    """A JSON object in inspected content repeats a key.
-
-    Raised by ``_reject_duplicate_keys`` during a parse for
-    inspection; converted to ``_UninspectableContentError`` by
-    ``_parse_for_inspection`` — never propagated raw.
-    """
-
-
-def _reject_duplicate_keys(pairs: list) -> dict:
-    """``object_pairs_hook`` that refuses repeated keys.
-
-    Standard parsing keeps only the LAST value of a duplicated
-    key and discards the rest BEFORE inspection runs, so flagged
-    text in a discarded position passed the door unseen while
-    the record stored it verbatim (Linear fourth look, Nov 21,
-    2026). A repeated key makes the content ambiguous as
-    written — which of its values the record carries is a
-    parser convention, not a fact — so the hook raises instead
-    of choosing. The system's own serialization never repeats
-    a key, so nothing the system itself writes is affected.
-    """
-    obj: dict = {}
-    for key, value in pairs:
-        if key in obj:
-            raise _DuplicateKeyError(key)
-        obj[key] = value
-    return obj
+# The duplicate-key mechanism moved to the shared strict loader
+# (strictjson.py, Linear sixth-look fix, Nov 22, 2026), so the
+# live pipeline's reply parser closes the same hole the door
+# closed in the fourth look — one mechanism, closed once. These
+# aliases keep this module's names stable; the door's POLICY on
+# top of the mechanism (conversion to _UninspectableContentError
+# in _parse_for_inspection) is unchanged.
+_DuplicateKeyError = DuplicateKeyError
+_reject_duplicate_keys = reject_duplicate_keys
 
 
 def _parse_for_inspection(text: str):
@@ -246,9 +228,7 @@ def _parse_for_inspection(text: str):
     is uninspectable (see ``_judged_signals``).
     """
     try:
-        return json.loads(
-            text, object_pairs_hook=_reject_duplicate_keys
-        )
+        return loads_strict(text)
     except _DuplicateKeyError as error:
         raise _UninspectableContentError(
             "a JSON object repeats the key "

@@ -20,21 +20,46 @@ an apology: the exhibits are labeled, not lamented.
 
 ---
 
-## 1. The three skeletons are not wired together
+## 1. The three skeletons are not wired together — RETIRED (2026-11-22)
 
-The repository contains three code skeletons — the Layer One pipeline,
-the barrier's population arithmetic, and the memory foundation — and
-they do not call each other. The pipeline does not consult the barrier
-and does not write to the memory; the morality gate does not stand in
-the memory's write hook (the hook exists, and is empty). The assembled
-system traced in the capstone thesis (THESIS-COMPLETE.md, §§3–4)
-exists as design, not as running code.
+This entry was true when it was written, and it stopped being true
+on November 21, 2026. It is kept, marked retired, because the museum
+records what was believed and when it stopped being true — it does
+not quietly delete exhibits.
 
-**Where it lives:** `src/duality_ai/` — `pipeline.py`, `barrier.py`,
-and `memory.py` are independent modules; stated in THESIS-COMPLETE.md
-§6. **Retired by:** an integration demonstration that wires the three
-skeletons into one program — a step passing barrier → pipeline → gate
-→ memory write — with tests.
+As written, the entry said: the repository contains three code
+skeletons — the Layer One pipeline, the barrier's population
+arithmetic, and the memory foundation — and they do not call each
+other. The pipeline does not consult the barrier and does not write
+to the memory; the morality gate does not stand in the memory's
+write hook (the hook exists, and is empty). The assembled system
+traced in the capstone thesis (THESIS-COMPLETE.md, §§3–4) exists as
+design, not as running code.
+
+What retired it: `src/duality_ai/system.py` — `DualitySystem`, one
+assembled program in which a step passes barrier admission → recall
+→ hemispheres → hub → morality gate → barrier response → guarded
+memory write, with the gate itself standing in the memory's write
+hook and consolidation one call away. The layer classes are used
+unmodified. The wiring was built November 21, 2026 and hardened
+through six adversarial audit rounds (Linear, November 21–22, 2026).
+
+What remains true — the qualification the auditor stated (Linear,
+sixth look, November 22, 2026) and this record adopts: "full §3
+loop" is accurate as **structural sequencing, not functional
+completion**. Inside the loop, recall is still traced but not
+consumed by the hemispheres, and the barrier's inspection and
+sandboxing remain unbuilt — admission and release run the
+population laws and a labeled sizing substitute, not observation.
+The wiring retired the *separation*; it did not complete the
+*functions*.
+
+**Where it lives:** the retired claim lived in this entry; the
+integration lives in `src/duality_ai/system.py`. **Retired by:**
+the integration demonstration this entry prescribed — the three
+skeletons wired into one program, a step passing barrier →
+pipeline → gate → memory write, with tests — November 21, 2026;
+recorded here November 22, 2026.
 
 ## 2. The clause library is four clauses, and hard-clause conflicts are only newly answered
 
@@ -342,6 +367,29 @@ and in `docs/real-model-results.md`. **Retired by:** an independent
 judge for baseline runs — human scoring, or a second extractor
 unrelated to the pipeline's own — applied to a rerun of the same
 corpus.
+
+## 16. Every inspection surface reads the same detector
+
+The pipeline's gate, the barrier's sizing input, and the memory's
+guarded door stand in three different places and judge three
+different artifacts — a request, a proposal, a stored record. All
+three take their signals from one instrument: the deterministic
+marker detector, `markers.detect_signals`. The layers are diverse
+in placement and identical in perception. A flagged act phrased in
+words the detector does not know passes every surface at once —
+not because any layer failed to look, but because all of them look
+with the same eyes. The audit rounds of November 21–22, 2026
+hardened *where* inspection happens (the release is now inspected,
+not only the request) and *how strictly* it parses; they did not
+diversify *what* inspection can see, and this entry records that
+distinction plainly, so the hardening is not misread as perception.
+
+**Where it lives:** `src/duality_ai/markers.py`; its callers in
+`live.py`, `pipeline.py`, and `system.py`. **Retired by:** a
+second, independently built detection pass at one surface — the
+guarded door is the natural place — whose readings are unioned
+with the first, or by a real model's judgment admitted as a signal
+source at a surface, with the union rule stated in the open.
 
 ---
 

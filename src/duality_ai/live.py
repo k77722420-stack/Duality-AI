@@ -30,17 +30,26 @@ Three further rules (review findings 1, 2 and 3, Nov 13, 2026):
   check finds nothing. A missing or unrecognized stance earns no
   leniency (fail closed, and it adds no new format failures: the key is
   optional and only ever matters on a flagged, labeled step).
+* **The gate judges the release, not just the request.** Detection
+  originally ran on the request alone, so a benign request could
+  release flagged content the model introduced in its selected
+  answer — the gate passed it unseen, and the memory door's later
+  refusal could not retract the release (Linear sixth look,
+  Nov 22, 2026). The selected output is now inspected before the
+  gate judges: its detected signals join the union the gate sees,
+  and the leniency content condition must hold for the output too —
+  a selected answer that itself performs earns no context.
 """
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from .base import BaseLayer
 from .markers import detect_signals, live_labels, performs
 from .model import ModelClient
 from .morality import MoralityGate
+from .strictjson import DuplicateKeyError, loads_strict
 
 # The only signals the logical hemisphere may raise. This is the
 # vocabulary the shipped clause library watches for; anything outside
@@ -116,7 +125,22 @@ class _FormatFailure(Exception):
 
 def _parse_json_object(raw: str, stage: str) -> dict:
     try:
-        data = json.loads(raw)
+        data = loads_strict(raw)
+    except DuplicateKeyError as error:
+        # A repeated key discards evidence before validation can
+        # see it: standard parsing keeps only the LAST value, so a
+        # reported signal in an earlier position vanished and the
+        # step proceeded on the remainder (Linear sixth look,
+        # Nov 22, 2026). The shared strict loader refuses the
+        # reply instead of choosing between its values; like every
+        # parse failure here, that is a format failure — fail
+        # closed. (The guarded memory door rejects duplicates for
+        # the same reason, through the same loader.)
+        raise _FormatFailure(
+            f"{stage} reply repeats the key {error.args[0]!r}; "
+            "which of its values the reply carries cannot be "
+            "determined as written."
+        ) from error
     except (ValueError, TypeError, RecursionError) as error:
         # ValueError, not just its JSONDecodeError subclass: an
         # oversized integer literal in a reply trips the interpreter's
@@ -251,7 +275,11 @@ class LivePipeline:
         the union of the model's and the deterministic detector's, and
         a detector-only signal also raises a flag. The summary is the
         first surviving framing's text, or a merge note when none
-        survives (``no_framing_survived`` is then True).
+        survives (``no_framing_survived`` is then True). The selected
+        framing's text is itself inspected before the proposal goes
+        to the gate: its detected signals join the union, and a
+        selected text that itself performs withdraws every granted
+        context (see the module docstring's fourth rule).
         """
         accepted: list[dict] = []
         rejected: list[dict] = []
@@ -329,13 +357,32 @@ class LivePipeline:
         else:
             summary = chosen_text
 
+        contexts = granted_contexts(
+            request["prompt"], logical.get("stance")
+        )
+        if chosen_text is not None:
+            # The gate judges what the step would RELEASE (Linear
+            # sixth look, Nov 22, 2026): detection ran on the
+            # request only, so flagged content the model introduced
+            # in its selected answer reached the gate unseen — the
+            # step was released, and the memory door's refusal
+            # afterward could not retract the release. The selected
+            # text's signals now join the union the gate sees, and
+            # leniency's content condition must hold for the output
+            # as well as the request: a selected answer that itself
+            # performs earns no context.
+            for signal in detect_signals(chosen_text):
+                if signal not in signals:
+                    signals.append(signal)
+            signals.sort()
+            if performs(chosen_text):
+                contexts = []
+
         return {
             "summary": summary,
             "based_on_prompt": request["prompt"],
             "signals": signals,
-            "contexts": granted_contexts(
-                request["prompt"], logical.get("stance")
-            ),
+            "contexts": contexts,
             "no_framing_survived": chosen_text is None,
             "accepted": accepted,
             "rejected": rejected,

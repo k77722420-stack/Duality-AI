@@ -755,6 +755,21 @@ and tests. They demonstrate the *shape* of each layer's bookkeeping.
 They are not integrated into a single running program, they invoke no
 real language model, and they defend, remember, and judge nothing real.
 
+> **Update (2026-11-22).** Two claims in this section stopped being
+> true after it was written, and the ledger corrects them here
+> rather than quietly rewriting them. The integration it says does
+> not exist was built on November 21, 2026: `src/duality_ai/system.py`
+> assembles the three layers into one running program
+> (`DualitySystem`), a step passes the §3 loop end to end, and the
+> live pipeline (§6's second claim) had already brought a real model
+> inside on November 7, 2026. What the loop achieves is **structural
+> sequencing, not functional completion** — recall is traced but not
+> consumed by the hemispheres, and the barrier's inspection and
+> sandboxing remain unbuilt, exactly as the layer accounts below
+> describe. The test count below is likewise dated: the suite stands
+> at **228 tests as of November 22, 2026**, and runs in continuous
+> integration on every push.
+
 **Built — Layer One** (`src/duality_ai/`, files `base.py`,
 `hemispheres.py`, `hub.py`, `morality.py`, `pipeline.py`). A five-stage
 pipeline that runs a prompt through base representation, parallel

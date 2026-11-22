@@ -67,7 +67,7 @@ import os
 import threading
 import uuid
 from abc import ABC, abstractmethod
-from dataclasses import asdict, dataclass, field, fields, replace
+from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -812,8 +812,9 @@ class MemoryCloud:
 
         The record is offered to the write hook first (the guarded
         write): a hook returning False refuses the write, nothing is
-        stored, and None is returned. Otherwise the stored record is
-        returned.
+        stored, and None is returned. Otherwise a copy of the stored
+        record is returned — the caller's copy shares no mutable
+        state with the store's record.
         """
         if kind not in RECORD_KINDS:
             raise ValueError(f"kind must be one of {RECORD_KINDS}")
@@ -835,7 +836,16 @@ class MemoryCloud:
         if self.write_hook is not None and not self.write_hook(record):
             return None
         self.store.put(record)
-        return record
+        # A copy crosses the boundary, not the stored object
+        # (double-check after Linear's sixth look, Nov 22, 2026):
+        # the returned record IS the object the in-memory store
+        # holds (and the file store's working copy), so a caller's
+        # in-place edit rewrote stored memory and broke its seal
+        # outside the write path — the recall finding's write-path
+        # twin. recall() learned the deep-copy rule on the way out;
+        # the write path follows it on the way in. This also covers
+        # consolidate(), whose results are remember()'s returns.
+        return _copy_record(record)
 
     # -- reading ---------------------------------------------------------
 
@@ -849,8 +859,9 @@ class MemoryCloud:
     ) -> list[MemoryRecord]:
         """Recall memories, strongest (least decayed) first.
 
-        Returned records are copies carrying their *current* decayed
-        strength; the stored records are never mutated by a recall.
+        Returned records are deep copies carrying their *current*
+        decayed strength — they share no mutable state with the
+        stored records, which a recall never mutates.
         ``text`` matches a case-insensitive substring of the content.
 
         Provenance is checked on the way out (Linear audit fix,
@@ -897,20 +908,25 @@ class MemoryCloud:
             r.id for r in found if id(r) not in verified
         ]
         found = [r for r in found if id(r) in verified]
-        # tags are copied explicitly: dataclasses.replace is shallow,
-        # so without the copy a recalled record would share its tags
-        # list with the stored record, and a caller's append would
-        # rewrite stored memory outside the write path — invalidating
-        # hashes and changing pruning eligibility. (Audit fix,
-        # Nov 12, 2026.)
-        ranked = [
-            replace(
-                r,
-                tags=list(r.tags),
-                strength=self._decayed_strength(r, moment),
-            )
-            for r in found
-        ]
+        # Every returned record is a DEEP copy. The earlier
+        # construction copied only ``tags`` explicitly
+        # (dataclasses.replace is shallow — audit fix, Nov 12,
+        # 2026), so any OTHER mutable field an imported record
+        # carried stayed shared with the stored record: a caller
+        # appending to a recalled record's list-valued ``source``
+        # rewrote stored memory outside the write path, broke its
+        # provenance seal, and hid it from later recalls (Linear
+        # sixth look, Nov 22, 2026). The rule is now the one
+        # ``_copy_record`` states, applied at the cloud's boundary:
+        # a record handed out shares NO mutable state with the
+        # stored record, whatever its fields carry. The decayed
+        # strength is set on the copy; the stored record is never
+        # mutated by a recall.
+        ranked = []
+        for r in found:
+            copied = _copy_record(r)
+            copied.strength = self._decayed_strength(r, moment)
+            ranked.append(copied)
         ranked.sort(key=lambda r: r.strength, reverse=True)
         return ranked
 
