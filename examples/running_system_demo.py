@@ -178,6 +178,10 @@ def trace_a() -> dict:
 
     with _pinned_record_ids():
         cloud = MemoryCloud(InMemoryStore())
+        # Tag authority (KL-18, Nov 22, 2026): this demo writes
+        # the system's episodes itself, gate: tags included, so
+        # it claims the cloud's authority like the system does.
+        tag_authority = cloud.claim_tag_authority()
 
         # -- Movements 3-5 + 7, three times: think, judge, remember. --
         for run_no, stamp in enumerate(TRACE_A_STAMPS, start=1):
@@ -215,6 +219,7 @@ def trace_a() -> dict:
                 owner="shared",
                 tags=["pipeline-run", f"gate:{trace['decision']}"],
                 created_at=stamp,
+                _authority=tag_authority,
             )
             episodes.append(record)
             if run_no == 1:

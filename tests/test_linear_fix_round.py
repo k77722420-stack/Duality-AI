@@ -327,6 +327,11 @@ def test_minimal_pre_fix_records_still_read_and_recall(tmp_path):
     # by the assembled system without error.
     path = tmp_path / "memory.json"
     cloud = MemoryCloud(store=JsonFileStore(path))
+    # Tag authority (KL-18, Nov 22, 2026): the legacy record
+    # carries a gate: tag, so the seeding curator claims the
+    # cloud's authority and presents it. (Fixture updated at
+    # the KL-18 build; the test's subject — pre-fix records
+    # still read and recall — is unchanged.)
     legacy = cloud.remember(
         "episodic",
         json.dumps(
@@ -337,6 +342,7 @@ def test_minimal_pre_fix_records_still_read_and_recall(tmp_path):
         stage="post-gate",
         owner="shared",
         tags=["pipeline-run", "gate:proceed"],
+        _authority=cloud.claim_tag_authority(),
     )
     system = DualitySystem(store=JsonFileStore(path))
     result = system.run(BENIGN)

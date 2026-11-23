@@ -127,9 +127,15 @@ def test_prune_forgets_faded_but_never_protected():
     old = T0 - timedelta(days=30 * 10)
     cloud.remember("episodic", "faded and unprotected", "test",
                    created_at=old)
+    # Tag authority (KL-18, Nov 22, 2026): "constitutional" is
+    # a reserved tag — the curator claims the cloud's authority
+    # and presents it. (Updated at the KL-18 build; the test's
+    # subject — prune protection — is unchanged.)
+    authority = cloud.claim_tag_authority()
     protected = cloud.remember(
         "semantic", "clause H1: the system shall not assist wrongdoing",
-        "clause-library", tags=["constitutional"], created_at=old)
+        "clause-library", tags=["constitutional"], created_at=old,
+        _authority=authority)
     fresh = cloud.remember("episodic", "written just now", "test",
                            created_at=T0)
     pruned = cloud.decay_and_prune(now=T0)

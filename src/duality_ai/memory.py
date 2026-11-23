@@ -87,6 +87,27 @@ RECORD_OWNERS = ("logical", "creative", "shared", "barrier")
 CONSOLIDATED_TAG = "consolidated"
 
 
+def _is_reserved_tag(tag: str, protected_tags) -> bool:
+    """Whether a tag carries authority a mechanism obeys.
+
+    Tag authority (KL-18, built Nov 22, 2026): some tags are
+    not labels but claims a mechanism acts on — a policy
+    protected tag makes a record unprunable (and, in the
+    system, sizes the barrier); the consolidated mark makes
+    consolidation skip a record; a gate: tag is the system's
+    own decision claim and steers consolidation's bookkeeping
+    order. Those tags may be assigned only by a caller
+    presenting the cloud's tag-authority capability (see
+    MemoryCloud.claim_tag_authority) — never on a caller's
+    say-so alone. Every other tag is an ordinary label.
+    """
+    return (
+        tag in protected_tags
+        or tag == CONSOLIDATED_TAG
+        or tag.startswith("gate:")
+    )
+
+
 # ---------------------------------------------------------------------------
 # Timestamps
 # ---------------------------------------------------------------------------
@@ -661,6 +682,16 @@ class MemoryCloud:
             self.policy["consolidate_min_episodes"]
         )
         self.write_hook = write_hook
+        # Tag authority (KL-18, Nov 22, 2026): the capability a
+        # caller must present to assign a reserved tag. The
+        # token is created with the cloud and handed out once,
+        # by claim; the cloud's own internal paths use it
+        # directly. last_tag_refusals surfaces the most recent
+        # refused call's offending tags, mirroring
+        # last_recall_exclusions.
+        self._tag_token = object()
+        self._tag_authority_claimed = False
+        self.last_tag_refusals: list[str] = []
         # Whether the installed hook has been CLAIMED by an owning
         # system (see claim_write_hook). A claimed hook cannot be
         # replaced or cleared through set_write_hook: the door of an
@@ -705,6 +736,27 @@ class MemoryCloud:
             )
         self.write_hook = hook
         self._hook_owned = True
+
+    def claim_tag_authority(self):
+        """Claim this cloud's tag-authority capability.
+
+        One claimant per cloud (mirroring claim_write_hook):
+        the owning system claims it at construction; a curator
+        working with a bare cloud claims it directly. A second
+        claim raises ValueError. The returned token is the
+        capability: pass it as remember(_authority=...) to
+        assign a reserved tag. Holding the token is the trust
+        — in-process discipline, the same bound as the write
+        hook's claim, not a boundary against hostile code in
+        the same process.
+        """
+        if self._tag_authority_claimed:
+            raise ValueError(
+                "this cloud's tag authority is already claimed; "
+                "one authority per cloud"
+            )
+        self._tag_authority_claimed = True
+        return self._tag_token
 
     def _store_batch(self):
         """The store's maintenance batch, when it offers one.
@@ -851,6 +903,7 @@ class MemoryCloud:
         tags=(),
         created_at: datetime | str | None = None,
         strength: float = 1.0,
+        _authority=None,
     ) -> MemoryRecord | None:
         """Write a memory, chained to the current head.
 
@@ -864,6 +917,19 @@ class MemoryCloud:
             raise ValueError(f"kind must be one of {RECORD_KINDS}")
         if owner not in RECORD_OWNERS:
             raise ValueError(f"owner must be one of {RECORD_OWNERS}")
+        # Tag authority (KL-18): a reserved tag in the call is
+        # refused — the whole write, returning None like a hook
+        # refusal — unless the caller presents this cloud's
+        # claimed capability. The check sits at the common
+        # write boundary, ahead of the door: the door judges
+        # content and cannot see who is claiming what.
+        offending = [
+            tag for tag in tags
+            if _is_reserved_tag(tag, self.protected_tags)
+        ]
+        self.last_tag_refusals = offending
+        if offending and _authority is not self._tag_token:
+            return None
         record = MemoryRecord(
             id=uuid.uuid4().hex,
             kind=kind,
@@ -1053,6 +1119,16 @@ class MemoryCloud:
             pending.items(),
             key=lambda item: (_bookkeeping(item[0]), len(item[1]), item[0]),
         ):
+            # Tag authority (KL-18): the caller's summary tag is
+            # a claim the semantic record would carry forward.
+            # A reserved tag never propagates through
+            # consolidation — the distillation of this cluster
+            # is skipped and the refusal surfaced, rather than
+            # the derived record inheriting authority its
+            # sources' clustering never earned.
+            if _is_reserved_tag(tag, self.protected_tags):
+                self.last_tag_refusals = [tag]
+                continue
             cluster = [r for r in cluster if r.id not in claimed]
             if len(cluster) < self.consolidate_min_episodes:
                 continue
