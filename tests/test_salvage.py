@@ -356,3 +356,66 @@ def test_corrupt_twin_does_not_delete_honest_original(tmp_path):
     assert any(
         r.to_dict() == honest for r in _fresh_file_cloud(path).store.all()
     )
+
+
+# -- Linear's round-2 cases (hold on 9230a5e) ------------------
+#
+# Classification must judge the sequence the repair batch
+# reloaded from disk, not a stale in-memory snapshot; and
+# exact removal must use canonical payload identity, never
+# Python equality (1.0 == 1, but their hashes differ).
+
+
+def _canonical(value):
+    return json.dumps(value, sort_keys=True)
+
+
+def test_stale_snapshot_cannot_launder_current_corruption(tmp_path):
+    path = tmp_path / "store.json"
+    quarantine = tmp_path / "quarantine.jsonl"
+    original = _fresh_file_cloud(path)
+    assert original.remember("semantic", "honest", "review")
+
+    data = json.loads(path.read_text())
+    data[0]["content"] = "corruption-v1"
+    path.write_text(json.dumps(data))
+    stale = _fresh_file_cloud(path)
+
+    # Completed before salvage starts; no concurrent writer.
+    data[0]["content"] = "corruption-v2"
+    path.write_text(json.dumps(data))
+
+    assert stale.salvage(quarantine)["status"] == "repaired"
+    assert _fresh_file_cloud(path).verify_chain()
+    entries = [
+        json.loads(line) for line in quarantine.read_text().splitlines()
+    ]
+    assert any(
+        e["record"]["content"] == "corruption-v2" for e in entries
+    )
+    assert all(
+        r.content != "corruption-v2"
+        for r in _fresh_file_cloud(path).recall()
+    )
+
+
+def test_python_equal_twin_cannot_replace_honest_original(tmp_path):
+    path = tmp_path / "store.json"
+    quarantine = tmp_path / "quarantine.jsonl"
+    original = _fresh_file_cloud(path)
+    assert original.remember("semantic", "honest", "review")
+
+    honest = json.loads(path.read_text())[0]
+    twin = dict(honest, strength=1)
+    assert twin == honest
+    assert _canonical(twin) != _canonical(honest)
+    path.write_text(json.dumps([honest, twin]))
+
+    assert _fresh_file_cloud(path).salvage(quarantine)["status"] == (
+        "repaired"
+    )
+    assert _fresh_file_cloud(path).verify_chain()
+    assert any(
+        _canonical(r.to_dict()) == _canonical(honest)
+        for r in _fresh_file_cloud(path).store.all()
+    )

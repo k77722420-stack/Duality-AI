@@ -122,3 +122,48 @@ docs/policy-decisions-2026-11-22.md that differs from main
 (it records Decision 4, the salvage authorization itself).
 Both are declared in this round's scope explicitly; the
 earlier "nothing else differs" phrasing is withdrawn.
+
+## Fix round 2 — Linear's hold on 9230a5e (Nov 23, 2026)
+
+Linear's static review held the fix-round head with two
+further preservation defects; his two probe cases were run
+verbatim against the unmodified code first and FAILED 2/2,
+then passed 2/2 after the fixes. Both are permanent tests
+in tests/test_salvage.py.
+
+1. **Stale classification.** Salvage classified the records
+   an already-open store happened to hold, and only then
+   opened the repair batch — which reloads the file store
+   from disk. An offline change completed before salvage
+   started was therefore never classified: its removal
+   silently failed and the unexamined record was resealed
+   as valid; a stale healthy snapshot could likewise
+   pronounce a damaged disk healthy. No concurrent writer
+   is required. Fix: classification now runs INSIDE the
+   batch, on the working sequence the batch reloaded, and
+   a classified removal that fails raises — the batch
+   discards the uncommitted repair and nothing is
+   resealed. The quarantine evidence already appended
+   stays preserved; a retry reclassifies from disk.
+2. **Python-equality removal.** Exact removal compared
+   payloads with Python `==`, under which 1.0 == 1 — but
+   their canonical encodings, and therefore their record
+   hashes, differ. A corrupt copied-id twin (strength=1)
+   could cause removal of its honest original
+   (strength=1.0) and be resealed in its place. Fix: a
+   single canonical-payload identity — the same JSON form
+   the seal is computed over — now backs every remove_one
+   implementation, the same identity the quarantine
+   dedupe already used.
+
+Perplexity's process-kill regression and snapshot
+regression were re-run after these fixes: both PASS.
+Full suite: 324 passed.
+
+**Merge disposition (Linear's recommendation, Nov 23):**
+experiments/sandbox_real_session.py is held back from
+the salvage merge for a separate correction round (its
+fact-recall case, OLLAMA_HOST enforcement, and same-store
+comparison are Phase 1.4's pre-work). Decision 4
+(docs/policy-decisions-2026-11-22.md) belongs in the
+salvage scope.
