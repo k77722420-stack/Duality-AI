@@ -230,7 +230,10 @@ def _filter_dead_quotations(content: str, eligible_ids: set) -> tuple:
     surface the policy governs. Returns the possibly filtered
     content and the dropped entry ids; content that is not an
     episode payload, or in which nothing is dropped, comes back
-    byte-identical.
+    byte-identical. Malformed shapes — a non-text id, a shelf
+    that is not a list — are unverifiable by construction: they
+    are dropped and reported, never served and never raised over
+    (eleventh-look hardening, Nov 22, 2026).
     """
     try:
         parsed = json.loads(content)
@@ -245,14 +248,33 @@ def _filter_dead_quotations(content: str, eligible_ids: set) -> tuple:
     changed = False
     for shelf, entries in recalled.items():
         if not isinstance(entries, list):
+            # A shelf in any other shape is malformed as a whole:
+            # nothing in it can be verified, so the served copy
+            # carries an empty shelf and the loss is reported
+            # (eleventh-look hardening, Nov 22, 2026 — previously
+            # such a shelf passed through unfiltered).
+            dropped.append(
+                entries.get("id")
+                if isinstance(entries, dict)
+                and isinstance(entries.get("id"), str)
+                else None
+            )
+            recalled[shelf] = []
+            changed = True
             continue
         kept = []
         for entry in entries:
             entry_id = entry.get("id") if isinstance(entry, dict) else None
-            if entry_id in eligible_ids:
+            # Only a text id can be checked against the eligibility
+            # set; any other shape (list, dict, missing) is
+            # unverifiable by construction and is dropped, never
+            # raised over (eleventh-look hardening, Nov 22, 2026).
+            if isinstance(entry_id, str) and entry_id in eligible_ids:
                 kept.append(entry)
             else:
-                dropped.append(entry_id)
+                dropped.append(
+                    entry_id if isinstance(entry_id, str) else None
+                )
                 changed = True
         recalled[shelf] = kept
     if not changed:

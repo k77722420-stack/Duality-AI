@@ -21,7 +21,7 @@ import json
 from datetime import datetime, timedelta, timezone
 
 from duality_ai.memory import InMemoryStore, MemoryCloud
-from duality_ai.system import DualitySystem
+from duality_ai.system import DualitySystem, _filter_dead_quotations
 
 MARKER = "ZORBLAX-LEDGER-731"
 A_CONTENT = (
@@ -53,6 +53,9 @@ def _fixture():
 
 def test_dead_quotation_dropped_from_served_recall_archive_untouched():
     store, a_id, b_id = _fixture()
+    # Exact stored content, captured before any filtered run
+    # (eleventh-look test ask: compare exactly, not loosely).
+    before = next(r for r in store.all() if r.id == b_id).content
     MemoryCloud(store=store).decay_and_prune(now=T0 + timedelta(days=40))
     system = DualitySystem(store=store)
     result = system.run("Give me a plain status summary.")
@@ -65,17 +68,34 @@ def test_dead_quotation_dropped_from_served_recall_archive_untouched():
     assert b_id in recall_ids
     assert MARKER not in json.dumps(result["recall"])
     assert a_id in result["recall_quotation_drops"]
-    # The archive is not a surface: B as STORED still holds it.
-    stored_b = next(r for r in store.all() if r.id == b_id)
-    assert MARKER in stored_b.content
+    # The archive is not a surface: B as STORED is byte-identical.
+    after = next(r for r in store.all() if r.id == b_id).content
+    assert after == before
+    assert MARKER in after
 
 
 def test_live_quotation_is_served():
     store, a_id, b_id = _fixture()
     system = DualitySystem(store=store)
     result = system.run("Give me a plain status summary.")
-    assert MARKER in json.dumps(result["recall"])
     assert result["recall_quotation_drops"] == []
+    # B's quotation specifically — not the marker just anywhere
+    # (eleventh-look test ask): B's served summary carries an
+    # entry referencing A whose excerpt holds the marker.
+    served_b = next(
+        entry
+        for entries in result["recall"].values()
+        for entry in entries
+        if entry["id"] == b_id
+    )
+    payload = json.loads(served_b["content"])
+    quoted = [
+        e
+        for e in payload["recalled"]["shared"]
+        if isinstance(e, dict) and e.get("id") == a_id
+    ]
+    assert len(quoted) == 1
+    assert MARKER in quoted[0].get("excerpt", "")
 
 
 def test_dead_decision_embed_is_dropped():
@@ -131,3 +151,42 @@ def test_dead_decision_embed_is_dropped():
     # Stored container is untouched.
     stored = next(r for r in store.all() if r.id == container.id)
     assert source.id in stored.content
+
+
+def test_malformed_reference_ids_are_dropped_not_raised():
+    """Eleventh look, finding 1: a list- or dict-valued id must be
+    omitted and reported — never a TypeError."""
+    for bad_id in ([], {}):
+        content = json.dumps(
+            {"recalled": {"shared": [{"id": bad_id, "excerpt": MARKER}]}}
+        )
+        served, drops = _filter_dead_quotations(content, set())
+        assert MARKER not in served
+        assert len(drops) == 1
+
+
+def test_malformed_shelf_is_emptied_not_served():
+    """Eleventh look, finding 2: a non-list shelf must not pass
+    its contents through unfiltered."""
+    content = json.dumps(
+        {"recalled": {"shared": {"id": "missing", "excerpt": MARKER}}}
+    )
+    served, drops = _filter_dead_quotations(content, set())
+    assert MARKER not in served
+    assert drops == ["missing"]
+    assert json.loads(served)["recalled"]["shared"] == []
+
+
+def test_corrupt_source_quotation_is_dropped():
+    """A source whose stored content was altered outside the
+    system's operations fails its integrity check; it is excluded
+    from recall, and quotations of it are dropped with it."""
+    store, a_id, b_id = _fixture()
+    for record in store.all():
+        if record.id == a_id:
+            record.content = record.content + " (altered)"
+    system = DualitySystem(store=store)
+    recall = system._recall_precedent()
+    assert a_id in system.last_recall_exclusions
+    assert a_id in system.last_recall_quotation_drops
+    assert MARKER not in json.dumps(recall)

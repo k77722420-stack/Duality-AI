@@ -35,3 +35,29 @@ same fixture, same selection, same pruning.
 **Not built:** surface 2 (model-input construction) — seam 1
 is not wired yet. Perplexity's two-case A/B test is recorded in
 the decision as that wiring's acceptance gate.
+
+## Eleventh-look hardening (Nov 22, 2026)
+
+Linear's eleventh look HELD `94d748c` on two defects in this
+filter, both found by static inspection and confirmed by
+execution here before fixing:
+
+1. A quotation entry whose `id` was a list or a dict raised
+   `TypeError` (unhashable) instead of being omitted and
+   reported.
+2. A shelf stored in a non-list shape passed through
+   unfiltered — its contents served, nothing reported. (Scope,
+   hers: this affects direct-write/imported content, not
+   normally generated episodes.)
+
+**Fix:** only a text id can be eligible; any other id shape is
+unverifiable by construction and is dropped and reported,
+never raised over. A non-list shelf is malformed as a whole:
+the served copy carries an empty shelf and the loss is
+reported. Tests strengthened per her asks (B's quotation
+asserted specifically in the live control; stored content
+compared byte-for-byte before and after; malformed-id,
+malformed-shelf, and corrupt-source cases added — 6 filter
+tests). Her verification script's probe now passes all three
+boundaries; the named regression files pass (17) and the full
+suite is 263.
