@@ -654,13 +654,50 @@ class MemoryCloud:
             self.policy["consolidate_min_episodes"]
         )
         self.write_hook = write_hook
+        # Whether the installed hook has been CLAIMED by an owning
+        # system (see claim_write_hook). A claimed hook cannot be
+        # replaced or cleared through set_write_hook: the door of an
+        # assembled system is not a replaceable part (hook-ownership
+        # fix, Nov 22, 2026 — Perplexity's registration-edges
+        # verdict: a silently replaceable hook lets any later code
+        # disarm or substitute the door that judges writes).
+        self._hook_owned = False
         # Ids of records the most recent recall() excluded because
         # their provenance seal did not verify (see recall()).
         self.last_recall_exclusions: list[str] = []
 
     def set_write_hook(self, hook) -> None:
-        """Register (or clear, with None) the guarded-write hook."""
+        """Register (or clear, with None) the guarded-write hook.
+
+        A hook installed by claim (see claim_write_hook) is owned:
+        replacing or clearing it here raises ValueError. An
+        unclaimed hook — the bare-cloud use — may be set and
+        cleared freely, as before.
+        """
+        if self._hook_owned and hook is not self.write_hook:
+            raise ValueError(
+                "this cloud's write hook is claimed by its owning "
+                "system and cannot be replaced or cleared"
+            )
         self.write_hook = hook
+
+    def claim_write_hook(self, hook) -> None:
+        """Install the write hook as an owned claim.
+
+        One owning system per cloud: claiming a cloud that already
+        has a hook — claimed or not — raises ValueError, so two
+        systems can never silently share one door, and a system's
+        door cannot be installed over an existing judge. The
+        installed hook is marked owned; set_write_hook afterwards
+        cannot replace or clear it.
+        """
+        if self.write_hook is not None:
+            raise ValueError(
+                "this cloud already has a write hook; one owning "
+                "system per cloud"
+            )
+        self.write_hook = hook
+        self._hook_owned = True
 
     def _store_batch(self):
         """The store's maintenance batch, when it offers one.
