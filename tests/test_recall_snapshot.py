@@ -88,16 +88,20 @@ def test_snapshot_orders_multiple_survivors_per_shelf():
     # Linear's coverage correction (Nov 23, 2026): ordering
     # must be exercised with several surviving records per
     # shelf, the creative shelf included — not inferred
-    # from single-entry shelves.
+    # from single-entry shelves. Insertion order is
+    # deliberately scrambled (his nonblocking note on the
+    # cleared head 2ea73d0): an implementation that merely
+    # preserved insertion order must FAIL this test; only
+    # a real strongest-first sort passes.
     system = DualitySystem(store=InMemoryStore())
     cloud = system.cloud
     seeded = {}
     for owner, strengths in (
-        ("logical", [0.9, 0.5]),
-        ("creative", [0.95, 0.6, 0.25]),
-        ("shared", [0.85, 0.4]),
+        ("logical", [0.5, 0.9]),
+        ("creative", [0.25, 0.95, 0.6]),
+        ("shared", [0.4, 0.85]),
     ):
-        ids = []
+        pairs = []
         for strength in strengths:
             record = cloud.remember(
                 kind="episodic",
@@ -107,8 +111,10 @@ def test_snapshot_orders_multiple_survivors_per_shelf():
                 strength=strength,
             )
             assert record is not None
-            ids.append(record.id)
-        seeded[owner] = ids
+            pairs.append((strength, record.id))
+        seeded[owner] = [
+            rid for _, rid in sorted(pairs, reverse=True)
+        ]
     recall = system._recall_precedent()
     for owner, ids in seeded.items():
         assert [e["id"] for e in recall[owner]] == ids
