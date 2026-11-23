@@ -38,8 +38,16 @@ class DualityPipeline:
         self.hub = Hub()
         self.gate = MoralityGate(clauses_path)
 
-    def run(self, prompt: str) -> dict:
+    def run(self, prompt: str, precedent: str | None = None) -> dict:
         request = self.base.prepare(prompt)
+        if precedent is not None:
+            # Seam 1 (Nov 22, 2026): the precedent text the system
+            # rendered from its served recall rides on the request,
+            # visible in the base stage's output. The deterministic
+            # hemispheres do not reason over it — they do not reason
+            # at all (see hemispheres.py); the seam's consumer is
+            # the live pipeline's model calls.
+            request["precedent"] = precedent
         logical_out = self.logical.evaluate(request)
         creative_out = self.creative.evaluate(request)
         proposal = self.hub.merge(request, logical_out, creative_out)
