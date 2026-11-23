@@ -213,7 +213,36 @@ def _recalled_evidence(entry: dict) -> dict:
     return evidence
 
 
-def _filter_dead_quotations(content: str, eligible_ids: set) -> tuple:
+def _expected_quotation_evidence(record, eligible_ids: set) -> dict:
+    """The one genuine embedding of ``record`` as a quotation.
+
+    The embedding contract (see ``_RECALL_EMBED_LIMIT``) makes a
+    recalled entry a deterministic projection of its source
+    record: the reference fields, plus the source's gate decision
+    (for an episode) or a capped excerpt of its content (for any
+    other record), computed from the summary recall serves — the
+    source's content under the reuse filter. Anything else
+    presented under the record's id is not a quotation of it.
+
+    This is the binding the provenance fix adds (Nov 22, 2026 —
+    Perplexity's executed-probe verdict): eligibility of an id
+    and authenticity of the text attached to it are separate
+    checks, and only the first existed. Both the door (at
+    admission) and the recall filter (at serve time) compare a
+    presented entry against this recomputation.
+    """
+    served = _filter_dead_quotations(record.content, eligible_ids)[0]
+    summary = {
+        "id": record.id,
+        "kind": record.kind,
+        "owner": record.owner,
+        "source": record.source,
+        "content": served,
+    }
+    return _recalled_evidence(summary)
+
+
+def _filter_dead_quotations(content: str, eligible_ids: set, eligible_evidence: dict | None = None) -> tuple:
     """Apply the reuse policy to one served recall summary's content.
 
     Ken's reuse-policy decision (Nov 22, 2026 — adopted stricter
@@ -270,7 +299,13 @@ def _filter_dead_quotations(content: str, eligible_ids: set) -> tuple:
             # unverifiable by construction and is dropped, never
             # raised over (eleventh-look hardening, Nov 22, 2026).
             if isinstance(entry_id, str) and entry_id in eligible_ids:
-                kept.append(entry)
+                if eligible_evidence is None or (
+                    entry == eligible_evidence.get(entry_id)
+                ):
+                    kept.append(entry)
+                else:
+                    dropped.append(entry_id)
+                    changed = True
             else:
                 dropped.append(
                     entry_id if isinstance(entry_id, str) else None
@@ -311,9 +346,12 @@ class DualitySystem:
     library path for the gate, a store and policy for the cloud, the
     barrier's population numbers, and optionally a ``ModelClient`` —
     with one, the core is the live pipeline; without, the
-    deterministic skeleton. The system installs its gate as the
-    cloud's write hook, replacing any hook the cloud already had:
-    in an assembled system the door is the gate's, by design.
+    deterministic skeleton. The system builds its own cloud and
+    claims the cloud's write hook for its gate — one owning
+    system per cloud, and a claimed hook cannot be replaced or
+    cleared (hook-ownership fix, Nov 22, 2026). Two systems may
+    share a STORE; each then governs its own writes through its
+    own cloud and door, by construction.
 
     Attributes are public on purpose (the demo's style): ``pipeline``,
     ``barrier``, ``cloud``, and ``gate`` (the pipeline's own gate —
@@ -344,7 +382,7 @@ class DualitySystem:
         self.cloud = MemoryCloud(
             store=store, policy_path=policy_path, policy=policy
         )
-        self.cloud.set_write_hook(self._judge_write)
+        self.cloud.claim_write_hook(self._judge_write)
         self.last_write_judgment: dict | None = None
         # Digests of episode payloads THIS system has constructed in
         # run() and not yet written — the door's out-of-band
@@ -412,7 +450,38 @@ class DualitySystem:
         Registrations are per-instance and in-memory; one whose
         write never reaches the door stays until the instance
         ends. Tests: tests/test_perplexity_write_contract.py.
+
+        Before any of that, a write carrying the ``recalled``
+        quotation envelope has every embedded entry verified
+        against the store (provenance-binding fix, Nov 22, 2026):
+        each entry must equal the genuine embedding recomputed
+        from the record it names. A write whose quotations cannot
+        be verified — a fabricated excerpt under a genuine id, an
+        entry naming no record, a malformed shelf — is refused
+        outright, on either path; kind and source are caller
+        claims and are never treated as trusted construction.
+        Tests: tests/test_provenance_binding.py.
         """
+        if not self._verify_embedded_quotations(record):
+            self.last_write_judgment = {
+                "record_id": record.id,
+                "decision": "stop",
+                "reasons": [
+                    {
+                        "clause": "guarded-door",
+                        "outcome": "unverifiable_quotation",
+                        "detail": (
+                            "The write embeds a recalled quotation "
+                            "that does not match the genuine "
+                            "embedding of the record it names (or "
+                            "names no verified record); the write "
+                            "is refused rather than stored with an "
+                            "unverifiable attribution."
+                        ),
+                    }
+                ],
+            }
+            return False
         if self._consume_episode_authorization(record):
             try:
                 recorded = self._recorded_step_judgment(record)
@@ -459,6 +528,48 @@ class DualitySystem:
             "reasons": reasons,
         }
         return decision in _RELEASED
+
+    def _verify_embedded_quotations(self, record) -> bool:
+        """Whether every quotation a write embeds is genuine.
+
+        Content that does not parse, is not an object, or carries
+        no ``recalled`` object presents no quotation envelope and
+        passes here — the blind judgment still applies to it in
+        full. An envelope, once presented, is a provenance claim:
+        each shelf must be a list, each entry a dict whose text id
+        names a verified record in the store, and each entry must
+        EQUAL the genuine embedding recomputed from that record
+        (``_expected_quotation_evidence``). Anything else is
+        unverifiable and the write is refused by the caller.
+        """
+        try:
+            parsed = json.loads(record.content)
+        except (ValueError, TypeError, RecursionError):
+            return True
+        if not isinstance(parsed, dict):
+            return True
+        recalled = parsed.get("recalled")
+        if not isinstance(recalled, dict):
+            return True
+        verified = {r.id: r for r in self.cloud.recall()}
+        eligible_ids = set(verified)
+        for entries in recalled.values():
+            if not isinstance(entries, list):
+                return False
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    return False
+                entry_id = entry.get("id")
+                if not isinstance(entry_id, str):
+                    return False
+                source = verified.get(entry_id)
+                if source is None:
+                    return False
+                if entry != _expected_quotation_evidence(
+                    source, eligible_ids
+                ):
+                    return False
+        return True
 
     def _consume_episode_authorization(self, record) -> bool:
         """Whether this write is the one write of an episode payload
@@ -635,7 +746,16 @@ class DualitySystem:
         # Reuse policy (Ken's decision, Nov 22, 2026): the ids the
         # cloud itself serves as verified are the quotations'
         # eligibility set. Computed once, before the shelf reads.
-        eligible_ids = {record.id for record in self.cloud.recall()}
+        verified = self.cloud.recall()
+        eligible_ids = {record.id for record in verified}
+        # Provenance binding (Nov 22, 2026): the genuine embedding
+        # of every verified record, recomputed once per run, so
+        # the filter can check that an entry presented under an
+        # eligible id is that record's actual quotation.
+        eligible_evidence = {
+            record.id: _expected_quotation_evidence(record, eligible_ids)
+            for record in verified
+        }
         quotation_drops: list = []
         for shelf in ("logical", "creative", "shared"):
             records = self.cloud.recall(owner=shelf)
@@ -645,7 +765,7 @@ class DualitySystem:
             summaries = []
             for record in records:
                 content, drops = _filter_dead_quotations(
-                    record.content, eligible_ids
+                    record.content, eligible_ids, eligible_evidence
                 )
                 quotation_drops.extend(drops)
                 summaries.append(

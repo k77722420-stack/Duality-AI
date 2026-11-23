@@ -426,6 +426,51 @@ is not merely descriptive. Retirement path: tag authority — the
 protected tags assignable only by system acts (consolidation,
 clause loading), enforced at the write path.
 
+## 19. Quotation binding — ADDRESSED Nov 22, 2026 (provenance fix)
+
+(Added and addressed the same day: found by Perplexity's
+residual-case analysis, confirmed by an executed write-path
+probe, fixed on Ken's direction.) The reuse filter originally
+checked only that an embedded entry's id was eligible; the text
+attached to the id was never compared with the record it named,
+so a caller-authored write could carry fabricated text under a
+genuine record's id and recall served the fabrication under that
+id. The fix binds at both boundaries: the door refuses a write
+whose embedded entries do not equal the genuine embedding
+recomputed from the records they name
+(`_expected_quotation_evidence`), and the shipped recall filter
+drops a served entry that fails the same comparison — the
+protection for records stored before the fix or imported past
+the door. What remains, stated plainly: (a) the filter's
+membership-only mode (no evidence map) survives for unit
+isolation and is not the shipped configuration; (b) binding is
+checked against the source's currently served form — an entry
+whose source's own served form changed under the reuse policy
+may drop, which fails closed, in the policy's direction;
+(c) a plain record whose content is itself a quotation envelope
+is the one shape where the embedder's input and the door's
+recomputation can diverge, and there too the failure is a
+refusal, never a silent pass. Tests:
+tests/test_provenance_binding.py.
+
+## 20. The write hook was silently replaceable — ADDRESSED Nov 22, 2026
+
+(Added and addressed the same day, on Perplexity's
+registration-edges verdict.) `MemoryCloud.set_write_hook`
+accepted any replacement at any time, so any later code could
+disarm or substitute the door that judges writes, and nothing
+recorded the substitution. A system now CLAIMS its cloud's
+hook (`claim_write_hook`): claiming a cloud that already has a
+hook raises, and a claimed hook cannot be replaced or cleared
+through `set_write_hook`. An unclaimed hook on a bare cloud
+remains freely settable, as before. Scope, stated plainly: a
+`DualitySystem` builds its own cloud over its store, so two
+systems sharing a store each govern their own writes through
+their own door by construction — the cross-instance door
+substitution the verdict traced is not constructible through
+the constructor, and the claim now guards the surface that
+does exist. Tests: tests/test_provenance_binding.py.
+
 ## How this document is maintained
 
 An entry is removed only when the limitation is actually retired —

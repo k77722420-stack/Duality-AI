@@ -21,7 +21,11 @@ import json
 from datetime import datetime, timedelta, timezone
 
 from duality_ai.memory import InMemoryStore, MemoryCloud
-from duality_ai.system import DualitySystem, _filter_dead_quotations
+from duality_ai.system import (
+    DualitySystem,
+    _expected_quotation_evidence,
+    _filter_dead_quotations,
+)
 
 MARKER = "ZORBLAX-LEDGER-731"
 A_CONTENT = (
@@ -118,13 +122,13 @@ def test_dead_decision_embed_is_dropped():
             "logical": [],
             "creative": [],
             "shared": [
-                {
-                    "id": source.id,
-                    "kind": "episodic",
-                    "owner": "shared",
-                    "source": "field-note",
-                    "decision": "proceed",
-                }
+                # The genuine embedding of the source, exactly as
+                # the system's own projection computes it (the
+                # provenance-binding fix, Nov 22, 2026, requires
+                # embedded entries to be genuine; the source is a
+                # plain note, so its embedding carries an excerpt,
+                # not a decision).
+                _expected_quotation_evidence(source, {source.id})
             ],
         },
     }
