@@ -419,3 +419,38 @@ def test_python_equal_twin_cannot_replace_honest_original(tmp_path):
         _canonical(r.to_dict()) == _canonical(honest)
         for r in _fresh_file_cloud(path).store.all()
     )
+
+
+# -- Linear's round-3 case (hold on 89de400) -------------------
+#
+# Healthy salvage is a strict no-op: nothing written, nothing
+# appended. Classification lives inside the batch (round 2),
+# but an unchanged batch must exit without publication.
+
+
+def test_healthy_salvage_performs_no_publication(tmp_path):
+    path = tmp_path / "store.json"
+    quarantine = tmp_path / "quarantine.jsonl"
+    path.write_bytes(b"[]\n")
+    cloud = MemoryCloud(store=JsonFileStore(path))
+
+    with patch(
+        "duality_ai.memory.os.replace",
+        side_effect=AssertionError(
+            "healthy salvage attempted publication"
+        ),
+    ):
+        result = cloud.salvage(quarantine)
+
+    assert result["status"] == "healthy"
+    assert path.read_bytes() == b"[]\n"
+    assert not quarantine.exists()
+
+
+def test_healthy_salvage_creates_no_store_file(tmp_path):
+    path = tmp_path / "store.json"
+    quarantine = tmp_path / "quarantine.jsonl"
+    cloud = MemoryCloud(store=JsonFileStore(path))
+    assert cloud.salvage(quarantine)["status"] == "healthy"
+    assert not path.exists()
+    assert not quarantine.exists()

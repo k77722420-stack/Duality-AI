@@ -167,3 +167,29 @@ fact-recall case, OLLAMA_HOST enforcement, and same-store
 comparison are Phase 1.4's pre-work). Decision 4
 (docs/policy-decisions-2026-11-22.md) belongs in the
 salvage scope.
+
+## Fix round 3 — Linear's hold on 89de400 (Nov 23, 2026)
+
+The preservation fixes passed static review, but the
+in-batch classification introduced a contract regression:
+healthy salvage — documented as a strict no-op, nothing
+written or appended — now exited the file store's batch,
+whose clean exit published unconditionally. A healthy
+file was replaced, a nonexistent store became an actual
+[] file, and a publication failure could raise where no
+repair was needed. Linear's probe (publication patched to
+raise) failed pre-fix exactly as predicted, and passes
+after; it and the nonexistent-store case are permanent
+tests in tests/test_salvage.py.
+
+Fix: the batch itself now detects change. JsonFileStore's
+batch fingerprints the working sequence it loaded
+(canonical serialization, hashed) and publishes on exit
+only if the fingerprint differs. Classification stays
+inside the batch; an unchanged repair transaction exits
+without publication. The detection compares content, so
+in-place edits under a batch (consolidation's marking)
+still publish exactly once, as before.
+
+Full suite: 326 passed. Perplexity's interruption and
+snapshot probes re-run: PASS.

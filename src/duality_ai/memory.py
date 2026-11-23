@@ -491,6 +491,22 @@ class JsonFileStore(MemoryStore):
                 tmp.unlink()
             raise
 
+    def _fingerprint_locked(self) -> str:
+        """A hash of the working sequence as publication
+        would serialize it. The caller must hold the lock.
+
+        Batch change detection: if the fingerprint at exit
+        equals the one taken at entry, the batch changed
+        nothing, and publication would only rewrite identical
+        contents — so it is skipped.
+        """
+        payload = json.dumps(
+            [r.to_dict() for r in self._records],
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
     def _save(self) -> None:
         """Save now — unless a batch is deferring the commit."""
         if self._batching:
@@ -545,9 +561,19 @@ class JsonFileStore(MemoryStore):
             self._reload_locked()
             self._batching = True
             self._batch_owner = threading.get_ident()
+            entry_fingerprint = self._fingerprint_locked()
             try:
                 yield
-                self._save_locked()
+                # Publication is for changes. A batch whose
+                # working sequence is exactly what it loaded
+                # — salvage's healthy no-op is the standing
+                # case — exits without touching the file: no
+                # replacement, no file created from nothing,
+                # no publication failure where no repair was
+                # needed (Linear's hold on 89de400, Nov 23,
+                # 2026).
+                if self._fingerprint_locked() != entry_fingerprint:
+                    self._save_locked()
             except BaseException:
                 self._reload_locked()  # discard the uncommitted work
                 raise
