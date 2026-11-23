@@ -391,7 +391,40 @@ guarded door is the natural place — whose readings are unioned
 with the first, or by a real model's judgment admitted as a signal
 source at a surface, with the union rule stated in the open.
 
----
+## 17. The episode authorization is a one-shot admission, not a write receipt
+
+(Added Nov 22, 2026, on Perplexity's review of the F-S1 fix.) The
+door's out-of-band authorization is consumed at judgment, before the
+store commits the write. The mechanism therefore establishes only
+that this running instance registered the episode's exact bytes and
+had not yet consumed that registration — not who submitted the
+bytes, not that the store committed them, and not that quoted
+records remain eligible for recall. If a commit fails after
+consumption, the approved episode is not retained; the failure
+surfaces as the store's error, never as a policy refusal, and no
+recovery or exactly-once retry is provided — a resubmission is a
+new write, judged blind. Registrations are per-instance and
+in-memory, and check-and-consume is not atomic across threads
+sharing one system instance; the shipped usage is one synchronous
+`run()` at a time. The contract is pinned in the `_judge_write`
+docstring and in tests/test_perplexity_write_contract.py.
+Retirement path: a durable write identity and commit receipt,
+defined separately from the authorization, if submission ever
+crosses a queue, worker, or retry boundary.
+
+## 18. Protected tags are self-assignable
+
+(Added Nov 22, 2026, on Perplexity's review.) `MemoryCloud.remember`
+accepts `tags` from any caller with no authority check, so a caller
+can tag its own record `constitutional` and make it exempt from
+pruning. The guarded door judges content signals, not tags, and
+consolidation inherits the pooled episodes' shared tag, so the
+assignment propagates. In the shipped skeleton every writer is the
+system itself or the author's own hand, so the exposure is a design
+fact, not an observed abuse — but the tag changes retention, so it
+is not merely descriptive. Retirement path: tag authority — the
+protected tags assignable only by system acts (consolidation,
+clause loading), enforced at the write path.
 
 ## How this document is maintained
 

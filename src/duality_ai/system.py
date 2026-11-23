@@ -54,6 +54,24 @@ The seams, carried over from the demo and labeled, not hidden:
      until he makes it the door's strictness wins and the tension is
      surfaced in every affected run's trace.
 
+     THE AUTHOR'S CALL (Ken, Nov 22, 2026 — the TEC-12 decision and
+     the F-S1 direction): the door's strictness yields to the gate's
+     RECORDED judgment for pipeline episodes. An episode payload
+     carries its own step's gate decision and reasons; the door now
+     verifies the write against that record — a step the gate passed
+     with leniency, its cover recorded in the reasons, is admitted
+     when the payload's own sections carry no signal the gate did
+     not judge, and a stopped step's record is kept as a metadata-
+     only stop record (the TEC-12 build). The recalled section of a
+     payload quotes records the door already admitted and is not
+     re-judged as this step's content. Every other write — and any
+     episode whose content outruns its recorded judgment — is still
+     judged blind, with no leniency, exactly as above. Finding F-S1
+     (sandbox run, Nov 22, 2026) is what forced the question: the
+     strict door refused the episode of a step the gate had passed
+     with recorded leniency, so the system could not remember its
+     own leniency decisions.
+
 Nothing here reasons, defends, or remembers for real: the hemispheres
 are the same deterministic stand-ins (or, with ``model=``, the live
 pipeline over a caller-supplied model client), the barrier is the
@@ -63,6 +81,7 @@ What is new is only that they now run as one system.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -72,7 +91,7 @@ from .markers import detect_signals
 from .memory import MemoryCloud, MemoryStore
 from .model import ModelClient
 from .pipeline import DualityPipeline
-from .strictjson import DuplicateKeyError, reject_duplicate_keys
+from .strictjson import DuplicateKeyError, loads_strict, reject_duplicate_keys
 from .inspection import (
     UninspectableContentError as _UninspectableContentError,
     content_texts as _content_texts,
@@ -194,6 +213,75 @@ def _recalled_evidence(entry: dict) -> dict:
     return evidence
 
 
+def _filter_dead_quotations(content: str, eligible_ids: set) -> tuple:
+    """Apply the reuse policy to one served recall summary's content.
+
+    Ken's reuse-policy decision (Nov 22, 2026 — adopted stricter
+    than the reviewer's recommendation): a quotation embedded in
+    a record is served only while its source record still exists
+    and verifies. ``eligible_ids`` is the set of record ids the
+    cloud itself serves as verified. An episode payload's
+    ``recalled`` entries whose referenced id is not in that set —
+    pruned, never existed, or seal-failed — are dropped from the
+    SERVED copy, at both surfaces the policy names: the assembled
+    recall itself, and (when seam 1 is wired) model-input
+    construction, which will consume this same assembled recall.
+    The stored record is never rewritten: the archive is not the
+    surface the policy governs. Returns the possibly filtered
+    content and the dropped entry ids; content that is not an
+    episode payload, or in which nothing is dropped, comes back
+    byte-identical. Malformed shapes — a non-text id, a shelf
+    that is not a list — are unverifiable by construction: they
+    are dropped and reported, never served and never raised over
+    (eleventh-look hardening, Nov 22, 2026).
+    """
+    try:
+        parsed = json.loads(content)
+    except (ValueError, TypeError, RecursionError):
+        return content, []
+    if not isinstance(parsed, dict):
+        return content, []
+    recalled = parsed.get("recalled")
+    if not isinstance(recalled, dict):
+        return content, []
+    dropped: list = []
+    changed = False
+    for shelf, entries in recalled.items():
+        if not isinstance(entries, list):
+            # A shelf in any other shape is malformed as a whole:
+            # nothing in it can be verified, so the served copy
+            # carries an empty shelf and the loss is reported
+            # (eleventh-look hardening, Nov 22, 2026 — previously
+            # such a shelf passed through unfiltered).
+            dropped.append(
+                entries.get("id")
+                if isinstance(entries, dict)
+                and isinstance(entries.get("id"), str)
+                else None
+            )
+            recalled[shelf] = []
+            changed = True
+            continue
+        kept = []
+        for entry in entries:
+            entry_id = entry.get("id") if isinstance(entry, dict) else None
+            # Only a text id can be checked against the eligibility
+            # set; any other shape (list, dict, missing) is
+            # unverifiable by construction and is dropped, never
+            # raised over (eleventh-look hardening, Nov 22, 2026).
+            if isinstance(entry_id, str) and entry_id in eligible_ids:
+                kept.append(entry)
+            else:
+                dropped.append(
+                    entry_id if isinstance(entry_id, str) else None
+                )
+                changed = True
+        recalled[shelf] = kept
+    if not changed:
+        return content, []
+    return json.dumps(parsed), dropped
+
+
 # The inspection machinery — the error, the inspection parse,
 # the decoding walk, and the judged-signals union — moved to
 # the shared inspection module (inspection.py, Linear
@@ -258,9 +346,18 @@ class DualitySystem:
         )
         self.cloud.set_write_hook(self._judge_write)
         self.last_write_judgment: dict | None = None
+        # Digests of episode payloads THIS system has constructed in
+        # run() and not yet written — the door's out-of-band
+        # authorization for the recorded-judgment path (tenth-look
+        # fix, Nov 22, 2026). An entry is consumed by the write it
+        # authorizes; nothing else can register one.
+        self._episode_write_digests: set[str] = set()
         # Ids the most recent run's recall excluded because their
         # provenance seal did not verify (memory layer, recall()).
         self.last_recall_exclusions: list[str] = []
+        # Quotation source ids the most recent run's recall dropped
+        # under the reuse policy (source gone or unverifiable).
+        self.last_recall_quotation_drops: list[str | None] = []
 
     # -- the guarded door (movement 7's other half) -------------------
 
@@ -273,7 +370,60 @@ class DualitySystem:
         seam 3). The judgment is kept on ``last_write_judgment`` so
         the caller can see WHY a write was refused. The write
         proceeds only on a releasing decision.
+
+        One exception, the author's call recorded at seam 3 (F-S1,
+        Nov 22, 2026): a pipeline EPISODE carries its own step's
+        recorded gate judgment, and the door first verifies the
+        write against that record — a step the gate passed, with
+        any leniency cover on record, is admitted when the
+        payload's own sections carry no signal the gate did not
+        judge. Anything the record does not decide falls through
+        to the blind judgment below, unchanged.
+
+        The exception is bound out-of-band (tenth-look fix, Nov 22,
+        2026): it applies only to a payload this system itself
+        constructed in ``run()`` and registered by digest,
+        consumed by the one write it authorizes. A caller-authored
+        payload — however complete its claimed record, whatever it
+        sets ``source`` to — never reaches the recorded-judgment
+        path; it is judged blind, like every other write. A parser
+        recursion failure in the preliminary parse likewise falls
+        through to the blind judgment, whose inspection records it
+        as an uninspectable-content refusal.
+
+        What the exception establishes — and what it does not
+        (Perplexity's review, Nov 22, 2026, adopted as the claim
+        this mechanism makes): that this running instance
+        registered these exact bytes and has not yet consumed that
+        registration. It does not establish who submitted the
+        bytes, whether the store committed them, or whether
+        quoted records remain eligible for recall.
+
+        The write contract, pinned by the same review: ``run()``
+        is synchronous; registration and the write it authorizes
+        happen inside that one call. The authorization is consumed
+        at judgment, BEFORE the store commits. If the commit then
+        fails, the episode is not retained and the failure reaches
+        the caller as the store's error — never as a policy
+        refusal (a refusal returns None from ``remember()`` with
+        the judgment kept here; a storage failure raises). No
+        recovery or exactly-once retry is provided: resubmitting
+        the same content later is a new write, judged blind.
+        Registrations are per-instance and in-memory; one whose
+        write never reaches the door stays until the instance
+        ends. Tests: tests/test_perplexity_write_contract.py.
         """
+        if self._consume_episode_authorization(record):
+            try:
+                recorded = self._recorded_step_judgment(record)
+                if recorded is not None:
+                    verdict = self._judge_episode_against_record(
+                        record, recorded
+                    )
+                    if verdict is not None:
+                        return verdict
+            except RecursionError:
+                pass
         try:
             signals = _judged_signals(record.content)
         except _UninspectableContentError as error:
@@ -310,6 +460,161 @@ class DualitySystem:
         }
         return decision in _RELEASED
 
+    def _consume_episode_authorization(self, record) -> bool:
+        """Whether this write is the one write of an episode payload
+        this system constructed in ``run()`` — the out-of-band
+        authorization for the recorded-judgment path. The digest is
+        consumed either way, so an authorization serves exactly one
+        write; a replayed payload is a fresh write and is judged
+        blind.
+        """
+        if record.kind != "episodic" or record.source != "pipeline":
+            return False
+        digest = hashlib.sha256(
+            record.content.encode("utf-8")
+        ).hexdigest()
+        if digest in self._episode_write_digests:
+            self._episode_write_digests.discard(digest)
+            return True
+        return False
+
+    @staticmethod
+    def _recorded_step_judgment(record):
+        """The gate judgment a pipeline episode carries about its own
+        step, or None when the record is not such an episode.
+
+        Only a releasing judgment is returned: a stopped step's
+        episode keeps the blind judgment (and its refusal), exactly
+        as before — the recorded-judgment path exists to honor what
+        the gate PASSED, never to soften what it stopped.
+        """
+        if record.kind != "episodic" or record.source != "pipeline":
+            return None
+        try:
+            payload = loads_strict(record.content)
+        except (ValueError, TypeError, RecursionError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        gate = payload.get("gate")
+        if not isinstance(gate, dict):
+            return None
+        decision = gate.get("decision")
+        reasons = gate.get("reasons")
+        if decision not in _RELEASED or not isinstance(reasons, list):
+            return None
+        hub = payload.get("hub")
+        judged: list[str] = []
+        if isinstance(hub, dict):
+            signals = hub.get("signals")
+            if isinstance(signals, list):
+                judged = [s for s in signals if isinstance(s, str)]
+        return {
+            "decision": decision,
+            "reasons": reasons,
+            "judged_signals": sorted(set(judged)),
+            "payload": payload,
+        }
+
+    def _judge_episode_against_record(self, record, recorded):
+        """Verify an episode write against its step's recorded gate
+        judgment (F-S1). Returns True when the record admits the
+        write, False when the write is uninspectable, or None when
+        the record does not decide it — the blind judgment then
+        applies, and refuses whatever outruns the record.
+
+        The payload's ``recalled`` section quotes records the door
+        already admitted; it is history, not this step's content,
+        and is not re-judged. The step's OWN sections (prompt,
+        hemispheres, hub, gate, answer) are judged: a plain pass
+        must carry no signal at all (the gate judged none), and a
+        leniency pass must carry only signals the gate judged,
+        under a leniency cover actually recorded in its reasons —
+        claimed leniency without the record decides nothing.
+        """
+        payload = recorded["payload"]
+        own = {
+            key: value
+            for key, value in payload.items()
+            if key != "recalled"
+        }
+        try:
+            own_signals = _judged_signals(
+                json.dumps(own, sort_keys=True)
+            )
+        except _UninspectableContentError as error:
+            self.last_write_judgment = {
+                "record_id": record.id,
+                "decision": "stop",
+                "reasons": [
+                    {
+                        "clause": "guarded-door",
+                        "outcome": "uninspectable_content",
+                        "detail": (
+                            "The write's content exceeds the door's "
+                            f"inspection budget ({error}); the write "
+                            "is refused rather than passed unjudged."
+                        ),
+                    }
+                ],
+            }
+            return False
+        if recorded["decision"] == "proceed":
+            if own_signals:
+                return None
+            basis = (
+                "the gate passed this step (proceed) and the "
+                "payload's own sections carry no signal"
+            )
+        else:  # proceed_with_leniency
+            # The gate never records a leniency pass alongside a
+            # blocking reason; a record claiming both is not the
+            # gate's record and decides nothing (tenth-look fix).
+            if any(
+                isinstance(reason, dict)
+                and reason.get("outcome") == "blocks"
+                for reason in recorded["reasons"]
+            ):
+                return None
+            cover = next(
+                (
+                    reason
+                    for reason in recorded["reasons"]
+                    if isinstance(reason, dict)
+                    and reason.get("outcome") == "engaged_but_lenient"
+                ),
+                None,
+            )
+            if cover is None:
+                return None
+            if not set(own_signals) <= set(recorded["judged_signals"]):
+                return None
+            basis = (
+                "the gate passed this step with leniency "
+                f"({cover.get('clause')} recorded as "
+                "engaged_but_lenient) and the payload's own "
+                f"signals {own_signals} are within the judged "
+                f"set {recorded['judged_signals']}"
+            )
+        self.last_write_judgment = {
+            "record_id": record.id,
+            "decision": recorded["decision"],
+            "reasons": [
+                {
+                    "clause": "guarded-door",
+                    "outcome": "recorded_judgment_honored",
+                    "detail": (
+                        "The write is verified against the step's "
+                        f"recorded gate judgment: {basis}. The "
+                        "recalled section, which quotes records "
+                        "already admitted, is not re-judged as this "
+                        "step's content."
+                    ),
+                }
+            ],
+        }
+        return True
+
     # -- movement 2: recall, per shelf ---------------------------------
 
     def _recall_precedent(self) -> dict:
@@ -318,30 +623,47 @@ class DualitySystem:
         Returns record summaries (identity, provenance, tags, current
         decayed strength, content) for the logical, creative, and
         shared shelves, strongest first — shown in the run's result,
-        not consumed by the skeleton pipeline (seam 1).
+        not consumed by the skeleton pipeline (seam 1). Embedded
+        quotations are served under the reuse policy (Ken's
+        decision, Nov 22, 2026): a quotation whose source record no
+        longer exists or no longer verifies is dropped from the
+        served copy and surfaced on ``last_recall_quotation_drops``;
+        the stored records are never rewritten by the filter.
         """
         recall: dict[str, list[dict]] = {}
         excluded: list[str] = []
+        # Reuse policy (Ken's decision, Nov 22, 2026): the ids the
+        # cloud itself serves as verified are the quotations'
+        # eligibility set. Computed once, before the shelf reads.
+        eligible_ids = {record.id for record in self.cloud.recall()}
+        quotation_drops: list = []
         for shelf in ("logical", "creative", "shared"):
             records = self.cloud.recall(owner=shelf)
             # The cloud excludes records whose provenance seal does
             # not verify; surface the exclusions, never hide them.
             excluded.extend(self.cloud.last_recall_exclusions)
-            recall[shelf] = [
-                {
-                    "id": record.id,
-                    "kind": record.kind,
-                    "owner": record.owner,
-                    "source": record.source,
-                    "stage": record.stage,
-                    "tags": list(record.tags),
-                    "created_at": record.created_at,
-                    "strength": record.strength,
-                    "content": record.content,
-                }
-                for record in records
-            ]
+            summaries = []
+            for record in records:
+                content, drops = _filter_dead_quotations(
+                    record.content, eligible_ids
+                )
+                quotation_drops.extend(drops)
+                summaries.append(
+                    {
+                        "id": record.id,
+                        "kind": record.kind,
+                        "owner": record.owner,
+                        "source": record.source,
+                        "stage": record.stage,
+                        "tags": list(record.tags),
+                        "created_at": record.created_at,
+                        "strength": record.strength,
+                        "content": content,
+                    }
+                )
+            recall[shelf] = summaries
         self.last_recall_exclusions = excluded
+        self.last_recall_quotation_drops = quotation_drops
         return recall
 
     # -- the barrier's sizing input -------------------------------------
@@ -463,9 +785,16 @@ class DualitySystem:
             ),
         }
         self.last_write_judgment = None
+        content = json.dumps(payload, sort_keys=True)
+        # Authorize THIS episode's write out-of-band: the door's
+        # recorded-judgment path applies only to a payload the
+        # system itself constructed, registered here, once.
+        self._episode_write_digests.add(
+            hashlib.sha256(content.encode("utf-8")).hexdigest()
+        )
         record = self.cloud.remember(
             kind="episodic",
-            content=json.dumps(payload, sort_keys=True),
+            content=content,
             source="pipeline",
             stage="post-gate",
             owner="shared",
@@ -481,6 +810,9 @@ class DualitySystem:
             "prompt": trace["prompt"],
             "recall": recall,
             "recall_exclusions": list(self.last_recall_exclusions),
+            "recall_quotation_drops": list(
+                self.last_recall_quotation_drops
+            ),
             "pipeline": trace,
             "decision": trace["decision"],
             "released": trace["released"],
