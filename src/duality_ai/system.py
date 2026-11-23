@@ -1279,6 +1279,16 @@ class DualitySystem:
             stage="stop-record",
             owner="barrier",
             tags=["stop-record"],
+            # The system's own trusted write presents its
+            # claimed tag authority (Linear's tag-authority
+            # hold, Nov 22, 2026): "stop-record" is deliberately
+            # not reserved in the shipped policy, but protected
+            # tags are policy data — a deployment that protects
+            # the tag must not silently lose its stop audit
+            # records to a tag refusal. The stop-kind digest
+            # authorization and the payload schema checks are
+            # unchanged and still govern the write.
+            _authority=self._tag_authority,
         )
         if record is None:
             return {"status": "failed", "record_id": None}

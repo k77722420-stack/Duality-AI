@@ -917,6 +917,14 @@ class MemoryCloud:
             raise ValueError(f"kind must be one of {RECORD_KINDS}")
         if owner not in RECORD_OWNERS:
             raise ValueError(f"owner must be one of {RECORD_OWNERS}")
+        # Materialize the tags ONCE (Linear's tag-authority
+        # hold, Nov 22, 2026): the authority check below
+        # traverses them, and the record materialized them
+        # again — a one-shot iterator arrived exhausted at
+        # storage and the admitted record silently lost its
+        # labels, authorized protection labels included. Check
+        # and persist the same list.
+        tags = list(tags)
         # Tag authority (KL-18): a reserved tag in the call is
         # refused — the whole write, returning None like a hook
         # refusal — unless the caller presents this cloud's
@@ -937,7 +945,7 @@ class MemoryCloud:
             content=content,
             source=source,
             stage=stage,
-            tags=list(tags),
+            tags=tags,
             created_at=_as_iso(created_at),
             strength=float(strength),
             prev_hash=self.head_hash(),
