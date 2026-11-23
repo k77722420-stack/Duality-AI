@@ -450,12 +450,28 @@ class LivePipeline:
             "released": False,
         }
 
-    def run(self, prompt: str) -> dict:
+    def run(self, prompt: str, precedent: str | None = None) -> dict:
         request = self.base.prepare(prompt)
         stages: list[dict] = [{"stage": "base", "output": request}]
 
+        # Seam 1 (Nov 22, 2026): the precedent text the system
+        # rendered from its served, reuse-filtered recall joins
+        # the model-bound user message of both hemisphere calls.
+        # The raw prompt alone still drives every deterministic
+        # check (signal detection, context granting, the merge):
+        # precedent is context for the model, never evidence
+        # about the current request.
+        user = prompt
+        if precedent:
+            user = (
+                f"{prompt}\n\n--- Precedent from memory "
+                "(context only; already filtered under the "
+                "reuse policy) ---\n"
+                f"{precedent}"
+            )
+
         try:
-            logical_out = self._logical_stage(prompt)
+            logical_out = self._logical_stage(user)
         except _FormatFailure as failure:
             return self._fail_closed(
                 request, stages, "logical_hemisphere", failure
@@ -463,7 +479,7 @@ class LivePipeline:
         stages.append({"stage": "logical_hemisphere", "output": logical_out})
 
         try:
-            creative_out = self._creative_stage(prompt)
+            creative_out = self._creative_stage(user)
         except _FormatFailure as failure:
             return self._fail_closed(
                 request, stages, "creative_hemisphere", failure

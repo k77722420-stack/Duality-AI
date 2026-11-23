@@ -412,19 +412,44 @@ Retirement path: a durable write identity and commit receipt,
 defined separately from the authorization, if submission ever
 crosses a queue, worker, or retry boundary.
 
-## 18. Protected tags are self-assignable
+## 18. Protected tags are self-assignable — ADDRESSED Nov 22, 2026 (tag authority)
 
-(Added Nov 22, 2026, on Perplexity's review.) `MemoryCloud.remember`
-accepts `tags` from any caller with no authority check, so a caller
-can tag its own record `constitutional` and make it exempt from
-pruning. The guarded door judges content signals, not tags, and
-consolidation inherits the pooled episodes' shared tag, so the
-assignment propagates. In the shipped skeleton every writer is the
-system itself or the author's own hand, so the exposure is a design
-fact, not an observed abuse — but the tag changes retention, so it
-is not merely descriptive. Retirement path: tag authority — the
-protected tags assignable only by system acts (consolidation,
-clause loading), enforced at the write path.
+(Added Nov 22, 2026, on Perplexity's review; addressed the same
+day on Ken's direction, at her placement verdict.) `MemoryCloud.remember`
+accepted `tags` from any caller with no authority check, so a caller
+could tag its own record `constitutional` and make it exempt from
+pruning; the guarded door judges content signals, not tags, and
+consolidation carried a caller-chosen tag into its semantic record,
+so the assignment propagated.
+
+The fix: a reserved set — the policy's protected tags (policy
+data, not hard-coded), the `consolidated` mark, and `gate:` tags —
+is assignable only by a caller presenting the cloud's
+tag-authority capability: a token created with the cloud, claimed
+once (`claim_tag_authority`, mirroring the write hook's claim),
+and passed as `remember(_authority=...)`. The check sits at the
+common write boundary, ahead of the door; a reserved tag without
+the capability refuses the whole write and surfaces on
+`last_tag_refusals`. The owning system claims the capability at
+construction and presents it on its episode writes; consolidation
+never propagates a reserved cluster tag — that cluster's
+distillation is skipped and the refusal surfaced.
+
+Bounds, stated plainly: (a) the capability is in-process
+discipline — code holding the cloud and the token can do
+anything, the same bound as the write hook's claim; the boundary
+governs the API's callers, not hostile code in the same process;
+(b) writes below the cloud (store-level imports) bypass
+remember() entirely, as they bypass the door; (c) the
+`stop-record` tag is deliberately NOT reserved — the stop kind
+carries that authority, and the tag moves no mechanism;
+(d) the API offers no re-tag path (remember/recall return
+copies), so mutation means direct in-process object access,
+inside bound (a). Tests: tests/test_tag_authority.py (11).
+Three fixtures that seed reserved tags as curators (the prune
+test, the legacy-record test, the running-system demo) were
+updated to claim and present the authority — disclosed in
+docs/tag-authority-build-2026-11-22.md; no assertion changed.
 
 ## 19. Quotation binding — ADDRESSED Nov 22, 2026 (provenance fix)
 
