@@ -20,10 +20,16 @@ The leniency episode here is built with the live-pipeline test
 model (the tenth-look pattern), whose episode text the blind door
 independently refuses. That matters: the contract claim concerns
 the recorded-judgment path, so the resubmission legs need content
-whose only route in was the authorization. (With the scripted
-pipeline's plainer episode text, the blind door passes a
-resubmission on its own merits — an ordinary clean write, not an
-authorization replay. Found while writing these tests, Nov 22.)
+whose only route in was the authorization.
+
+Perplexity's correction, adopted Nov 22, 2026: the contract is
+that LENIENCY is single-use, not that the content is single-use.
+A second submission that needs the spent authorization is
+refused; a second submission that passes the blind judgment on
+its own merits is a new ordinary admission. Both cases are
+pinned, as a pair, so the flagged fixture does not become the
+whole story: see test_clean_resubmission_is_an_ordinary_admission
+below, which uses the scripted pipeline's plainer episode text.
 """
 
 import json
@@ -143,6 +149,35 @@ def test_commit_then_ack_loss_keeps_one_record_and_no_duplicate():
     assert _resubmit(restarted, content) is None
     assert len(store.all()) == 1
     assert MemoryCloud(store=store).verify_chain()
+
+
+def test_clean_resubmission_is_an_ordinary_admission():
+    """The pair to the flagged resubmission legs (Perplexity's
+    correction): what the authorization makes single-use is the
+    recorded-judgment path, not the content. This scripted-
+    pipeline episode's text reads clean to the blind door, so
+    resubmitting its exact content after the run is admitted —
+    as an ordinary blind-judged write, NOT via the recorded
+    judgment (the authorization is spent; the judgment on record
+    for the second write is the blind one)."""
+    system = DualitySystem()
+    result = system.run(
+        "Explain why phishing works, for teaching a safety class."
+    )
+    assert result["episode"]["written"] is True
+    stored = system.cloud.recall(kind="episodic")
+    content = next(
+        record.content
+        for record in stored
+        if "Explain why phishing works" in record.content
+    )
+    admitted = _resubmit(system, content)
+    assert admitted is not None
+    outcomes = [
+        reason.get("outcome")
+        for reason in system.last_write_judgment["reasons"]
+    ]
+    assert "recorded_judgment_honored" not in outcomes
 
 
 def test_a_policy_refusal_is_not_an_error():
