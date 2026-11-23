@@ -318,6 +318,28 @@ class DualitySystem:
         recursion failure in the preliminary parse likewise falls
         through to the blind judgment, whose inspection records it
         as an uninspectable-content refusal.
+
+        What the exception establishes — and what it does not
+        (Perplexity's review, Nov 22, 2026, adopted as the claim
+        this mechanism makes): that this running instance
+        registered these exact bytes and has not yet consumed that
+        registration. It does not establish who submitted the
+        bytes, whether the store committed them, or whether
+        quoted records remain eligible for recall.
+
+        The write contract, pinned by the same review: ``run()``
+        is synchronous; registration and the write it authorizes
+        happen inside that one call. The authorization is consumed
+        at judgment, BEFORE the store commits. If the commit then
+        fails, the episode is not retained and the failure reaches
+        the caller as the store's error — never as a policy
+        refusal (a refusal returns None from ``remember()`` with
+        the judgment kept here; a storage failure raises). No
+        recovery or exactly-once retry is provided: resubmitting
+        the same content later is a new write, judged blind.
+        Registrations are per-instance and in-memory; one whose
+        write never reaches the door stays until the instance
+        ends. Tests: tests/test_perplexity_write_contract.py.
         """
         if self._consume_episode_authorization(record):
             try:

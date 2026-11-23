@@ -139,3 +139,57 @@ mode, not the depth, was the finding).
 
 Awaiting Linear's eleventh look; nothing merges without it and
 Ken's word.
+
+---
+
+## Addendum 2 — Perplexity's review round (Nov 22, 2026)
+
+Perplexity reviewed the F-S1 arc as the Roundtable's independent
+second reader (a design review of the written account; she could
+not retrieve the pinned source, and said so). Her top line, adopted
+as this mechanism's claim:
+
+> The fix establishes that this running instance registered these
+> exact bytes and has not yet consumed that registration. It does
+> not establish who submitted the bytes, whether the store
+> committed them, or whether the quoted records are still eligible
+> for recall.
+
+**Dispositions (Ken engaged all recommendations, Nov 22, 2026):**
+
+- **Claim narrowed** — the sentence above now stands in the
+  `_judge_write` docstring where the mechanism is described.
+- **Transaction contract pinned** — in the same docstring and in
+  KNOWN-LIMITATIONS entry 17: authorization is consumed at
+  judgment, before commit; a commit failure loses the episode and
+  surfaces as the store's error, never as a policy refusal; no
+  recovery or exactly-once retry is provided; registrations are
+  per-instance, in-memory, and check-and-consume is not atomic
+  across threads (shipped usage is one synchronous `run()`).
+- **Her test pair built** — `tests/test_perplexity_write_contract.py`:
+  failure-before-commit (error, not refusal; nothing stored; the
+  spent authorization does not revive the content) and
+  commit-then-acknowledgment-lost (one durable record, chain
+  verifies, retry refused blind, no duplicate), plus the
+  refusal-is-not-an-error distinction. Suite: 256.
+- **Tag authority logged** — KNOWN-LIMITATIONS entry 18: protected
+  tags (e.g. `constitutional`) are self-assignable by any caller
+  of `remember()`; the door judges content, not tags, and
+  consolidation inherits the pooled tag. Verified by code reading.
+- **Also verified from her review:** consumption-before-commit
+  (the write hook runs before `store.put`); pruning a source
+  record does not erase copies quoted inside later episodes;
+  consolidation's semantic records DO pass the door and are judged
+  blind (answered in the system's favor); recall follows policy at
+  admission — policy-at-reuse is undecided and logged as a design
+  question, not silently settled.
+- **A discovery while writing her tests:** with the scripted
+  pipeline, the genuine leniency episode's text reads CLEAN to the
+  blind detector, so a resubmission of it is admitted on its own
+  merits — an ordinary clean write, not an authorization replay.
+  "Replay refused" is a property of flagged content (the
+  live-model episode in the tenth-look tests), not of the registry
+  alone. The registry's guarantee is only about the
+  recorded-judgment path, and the contract tests say so.
+- **Her §5 (stop records)** is folded into
+  `docs/stop-records-design-2026-11-22.md` as requirements.
