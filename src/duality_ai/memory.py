@@ -82,7 +82,7 @@ _DEFAULT_POLICY_PATH = (
 
 GENESIS_HASH = "DUALITY-MEMORY-START"
 
-RECORD_KINDS = ("episodic", "semantic")
+RECORD_KINDS = ("episodic", "semantic", "stop")
 RECORD_OWNERS = ("logical", "creative", "shared", "barrier")
 CONSOLIDATED_TAG = "consolidated"
 
@@ -650,6 +650,13 @@ class MemoryCloud:
         self.halflife_days: float = float(self.policy["halflife_days"])
         self.prune_threshold: float = float(self.policy["prune_threshold"])
         self.protected_tags: list[str] = list(self.policy["protected_tags"])
+        # Stop records (TEC-12, Nov 22, 2026): whether the audit
+        # trail of gate stops rides a protected retention or decays
+        # under the half-life law like every other record — policy
+        # data, Ken's call at the build; default is the law.
+        self.stop_records_protected: bool = bool(
+            self.policy.get("stop_records_protected", False)
+        )
         self.consolidate_min_episodes: int = int(
             self.policy["consolidate_min_episodes"]
         )
@@ -1112,6 +1119,8 @@ class MemoryCloud:
         pruned = 0
         for record in self.store.all():
             if any(tag in self.protected_tags for tag in record.tags):
+                continue
+            if record.kind == "stop" and self.stop_records_protected:
                 continue
             if self._decayed_strength(record, moment) < self.prune_threshold:
                 if self.store.remove(record.id):

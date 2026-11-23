@@ -1,7 +1,10 @@
 # Stop records — design (Nov 22, 2026)
 
-**Status:** DESIGN ONLY. No code yet. The build is a separate round
-on Ken's direction.
+**Status:** BUILT Nov 22, 2026 (build report:
+docs/stop-records-build-2026-11-22.md). Retention decided by Ken
+the same evening: PROTECTED — stop records do not decay
+(policy switch `stop_records_protected: true`); the switch is
+policy data, reversible by a later decision.
 **Decision it implements:** TEC-12, decided by Ken Nov 22, 2026 —
 when the gate stops a step, the system keeps a METADATA-ONLY stop
 record: signals, the gate decision and its reasons, a timestamp,

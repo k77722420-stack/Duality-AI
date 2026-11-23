@@ -67,7 +67,13 @@ def test_disguised_flagged_phrase_is_refused_at_the_door(disguised):
     assert result["decision"] == "stop"
     assert result["episode"]["written"] is False
     assert result["episode"]["write_judgment"]["decision"] == "stop"
-    assert system.cloud.store.all() == []
+    # TEC-12 (Nov 22, 2026): the cloud no longer stays literally
+    # empty — a stopped step leaves its metadata-only stop
+    # record. The episode is still refused, and the flagged
+    # phrase itself is still never stored (only its fingerprint).
+    records = system.cloud.store.all()
+    assert [r.kind for r in records] == ["stop"]
+    assert disguised not in records[0].content
 
 
 def test_planted_serialized_payload_cannot_disguise_a_phrase():

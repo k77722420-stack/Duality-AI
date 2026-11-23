@@ -284,7 +284,11 @@ def test_failed_live_stage_error_and_detail_are_durable(tmp_path):
     assert result["decision"] == "stop"
     assert result["episode"]["written"] is True
 
-    record = system.cloud.store.all()[-1]
+    # The episode record specifically (since TEC-12 a stopped
+    # run also leaves a stop record after it).
+    record = next(
+        r for r in system.cloud.store.all() if r.kind == "episodic"
+    )
     payload = json.loads(record.content)
     # Before the fix the payload had no error anywhere: the stop
     # was durable but unexplained. Now the failed stage's slot

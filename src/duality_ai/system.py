@@ -83,6 +83,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .barrier import Barrier
@@ -211,6 +213,72 @@ def _recalled_evidence(entry: dict) -> dict:
     else:
         evidence["excerpt"] = _cap_embedded(entry["content"])
     return evidence
+
+
+# The stop record's allowlist schema (TEC-12 design, Nov 22,
+# 2026). A stop record's payload is built ONLY from these keys —
+# system-derived metadata about a gate stop: identities, the
+# policy in force, the judged signal labels, stable reason codes,
+# and a fingerprint of the request. The flagged payload itself
+# is never stored. The validator is the schema's enforcement at
+# the write path: a stop payload carrying any other key, or a
+# reason carrying free-form detail, is not a stop record.
+_STOP_PAYLOAD_KEYS = {
+    "record_type",
+    "run_id",
+    "step_id",
+    "timestamp",
+    "policy_version",
+    "decision",
+    "signals",
+    "reasons",
+    "request_fingerprint",
+}
+
+
+def _validate_stop_payload(content: str) -> dict | None:
+    """The parsed payload, iff it is exactly a stop record.
+
+    Keys must be precisely the allowlist; the type fields must
+    name a stop; identity and fingerprint fields must be
+    non-empty text; signals a list of labels; reasons a list of
+    {clause, outcome} code pairs — no detail, no other keys.
+    Anything else returns None.
+    """
+    try:
+        parsed = json.loads(content)
+    except (ValueError, TypeError, RecursionError):
+        return None
+    if not isinstance(parsed, dict) or set(parsed) != _STOP_PAYLOAD_KEYS:
+        return None
+    if parsed["record_type"] != "stop" or parsed["decision"] != "stop":
+        return None
+    for key in (
+        "run_id",
+        "step_id",
+        "timestamp",
+        "policy_version",
+        "request_fingerprint",
+    ):
+        if not isinstance(parsed[key], str) or not parsed[key]:
+            return None
+    if not isinstance(parsed["signals"], list) or not all(
+        isinstance(x, str) for x in parsed["signals"]
+    ):
+        return None
+    if not isinstance(parsed["reasons"], list):
+        return None
+    for reason in parsed["reasons"]:
+        if not isinstance(reason, dict) or set(reason) != {
+            "clause",
+            "outcome",
+        }:
+            return None
+        if not all(
+            isinstance(reason[k], str) for k in ("clause", "outcome")
+        ):
+            return None
+    return parsed
 
 
 def _expected_quotation_evidence(record, eligible_ids: set) -> dict:
@@ -390,6 +458,12 @@ class DualitySystem:
         # fix, Nov 22, 2026). An entry is consumed by the write it
         # authorizes; nothing else can register one.
         self._episode_write_digests: set[str] = set()
+        # Digests of stop payloads THIS system has constructed in
+        # run() and not yet written — the same out-of-band
+        # discipline, bound to the stop operation and its kind
+        # (TEC-12 design, Nov 22, 2026): an episode registration
+        # can never authorize a stop record, nor the reverse.
+        self._stop_write_digests: set[str] = set()
         # Ids the most recent run's recall excluded because their
         # provenance seal did not verify (memory layer, recall()).
         self.last_recall_exclusions: list[str] = []
@@ -462,6 +536,50 @@ class DualitySystem:
         claims and are never treated as trusted construction.
         Tests: tests/test_provenance_binding.py.
         """
+        if record.kind == "stop":
+            # A stop record (TEC-12): admitted only as what it
+            # claims to be — a payload this system constructed
+            # for a gate stop, registered out-of-band, matching
+            # the allowlist schema exactly. A caller-authored
+            # "stop" record, however valid its shape, has no
+            # registration and is refused: audit history is not
+            # caller-writable.
+            if self._consume_stop_authorization(
+                record
+            ) and _validate_stop_payload(record.content) is not None:
+                self.last_write_judgment = {
+                    "record_id": record.id,
+                    "decision": "proceed",
+                    "reasons": [
+                        {
+                            "clause": "guarded-door",
+                            "outcome": "recorded_stop",
+                            "detail": (
+                                "A system-constructed stop record, "
+                                "registered for this write and "
+                                "matching the allowlist schema."
+                            ),
+                        }
+                    ],
+                }
+                return True
+            self.last_write_judgment = {
+                "record_id": record.id,
+                "decision": "stop",
+                "reasons": [
+                    {
+                        "clause": "guarded-door",
+                        "outcome": "invalid_stop_record",
+                        "detail": (
+                            "The write claims the stop kind "
+                            "without a live stop registration, or "
+                            "its payload is not exactly the "
+                            "allowlist schema; refused."
+                        ),
+                    }
+                ],
+            }
+            return False
         if not self._verify_embedded_quotations(record):
             self.last_write_judgment = {
                 "record_id": record.id,
@@ -551,7 +669,11 @@ class DualitySystem:
         recalled = parsed.get("recalled")
         if not isinstance(recalled, dict):
             return True
-        verified = {r.id: r for r in self.cloud.recall()}
+        verified = {
+            r.id: r
+            for r in self.cloud.recall()
+            if r.kind != "stop"
+        }
         eligible_ids = set(verified)
         for entries in recalled.values():
             if not isinstance(entries, list):
@@ -570,6 +692,23 @@ class DualitySystem:
                 ):
                     return False
         return True
+
+    def _consume_stop_authorization(self, record) -> bool:
+        """Whether this write is the one write of a stop payload
+        this system constructed in ``run()`` — the out-of-band
+        authorization for stop records, bound to the kind: the
+        digest is consumed on a match, and only a stop record
+        can spend a stop registration (TEC-12 design, Nov 22,
+        2026)."""
+        if record.kind != "stop":
+            return False
+        digest = hashlib.sha256(
+            record.content.encode("utf-8")
+        ).hexdigest()
+        if digest in self._stop_write_digests:
+            self._stop_write_digests.discard(digest)
+            return True
+        return False
 
     def _consume_episode_authorization(self, record) -> bool:
         """Whether this write is the one write of an episode payload
@@ -746,7 +885,9 @@ class DualitySystem:
         # Reuse policy (Ken's decision, Nov 22, 2026): the ids the
         # cloud itself serves as verified are the quotations'
         # eligibility set. Computed once, before the shelf reads.
-        verified = self.cloud.recall()
+        verified = [
+            r for r in self.cloud.recall() if r.kind != "stop"
+        ]
         eligible_ids = {record.id for record in verified}
         # Provenance binding (Nov 22, 2026): the genuine embedding
         # of every verified record, recomputed once per run, so
@@ -816,6 +957,8 @@ class DualitySystem:
         episode write — written, or refused at the guarded door, with
         the gate's judgment either way.
         """
+        run_id = uuid.uuid4().hex
+
         # Movement 1 — admission: the standing population is on duty.
         admission = self.barrier.status()
 
@@ -926,6 +1069,21 @@ class DualitySystem:
             "write_judgment": self.last_write_judgment,
         }
 
+        # Movement 7b — a stopped step leaves its audit record
+        # (TEC-12, Nov 22, 2026): metadata only, never the flagged
+        # payload. The stop stands whatever happens here — an
+        # audit-write failure is reported in the result, never
+        # converted into a release and never raised into the run.
+        if trace["decision"] == "stop":
+            stop_record = self._record_stop(
+                prompt=prompt,
+                proposal=proposal,
+                gate_output=gate_output,
+                run_id=run_id,
+            )
+        else:
+            stop_record = {"status": "not_applicable", "record_id": None}
+
         return {
             "prompt": trace["prompt"],
             "recall": recall,
@@ -944,7 +1102,77 @@ class DualitySystem:
                 "status": self.barrier.status(),
             },
             "episode": episode,
+            "stop_record": stop_record,
         }
+
+    def _record_stop(self, *, prompt, proposal, gate_output, run_id):
+        """Write the stop record for a gate stop (TEC-12).
+
+        The payload is built from the design's allowlist and
+        nothing else: system-issued identities, the policy in
+        force, the judged signal labels, reason CODES (clause id
+        + outcome — the free-form detail never crosses), and a
+        SHA-256 fingerprint of the request, so a repeat of the
+        identical request is recognizable without keeping it.
+        The durable idempotency key is the triple (run_id,
+        step_id, fingerprint): the same stop, recorded twice by
+        accident, is one record. A failed audit write reports
+        "failed" — the decision it audits is unaffected.
+        """
+        fingerprint = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+        step_id = "morality_gate"
+        for existing in self.cloud.store.find(kind="stop"):
+            try:
+                prior = json.loads(existing.content)
+            except (ValueError, TypeError, RecursionError):
+                continue
+            if (
+                isinstance(prior, dict)
+                and prior.get("run_id") == run_id
+                and prior.get("step_id") == step_id
+                and prior.get("request_fingerprint") == fingerprint
+            ):
+                return {
+                    "status": "already_recorded",
+                    "record_id": existing.id,
+                }
+        payload = {
+            "record_type": "stop",
+            "run_id": run_id,
+            "step_id": step_id,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "policy_version": (
+                f"{self.gate.library_name}@{self.gate.library_version}"
+            ),
+            "decision": "stop",
+            "signals": sorted(proposal.get("signals", [])),
+            "reasons": [
+                {
+                    "clause": reason.get("clause"),
+                    "outcome": reason.get("outcome"),
+                }
+                for reason in (gate_output.get("reasons") or [])
+            ],
+            "request_fingerprint": fingerprint,
+        }
+        content = json.dumps(payload, sort_keys=True)
+        self._stop_write_digests.add(
+            hashlib.sha256(content.encode("utf-8")).hexdigest()
+        )
+        try:
+            record = self.cloud.remember(
+                kind="stop",
+                content=content,
+                source="gate",
+                stage="stop-record",
+                owner="barrier",
+                tags=["stop-record"],
+            )
+        except Exception:
+            return {"status": "failed", "record_id": None}
+        if record is None:
+            return {"status": "failed", "record_id": None}
+        return {"status": "recorded", "record_id": record.id}
 
     # -- movement 8: the system's sleep -----------------------------------
 
