@@ -181,3 +181,44 @@ def test_consolidation_still_works_for_ordinary_tags():
     created = cloud.consolidate(created_at=T0)
     assert len(created) == 1
     assert created[0].tags == ["garden", "consolidation"]
+
+
+def test_authority_gates_before_content_judgment():
+    # Perplexity's acceptance check (tag-authority verdict,
+    # Nov 22, 2026), adopted verbatim in substance: lacking
+    # tag authority stops the write BEFORE content judgment;
+    # having it lets the write REACH content judgment without
+    # replacing it. A cloud whose policy protects "sacred";
+    # the capability claimed during trusted setup; a
+    # recording content hook that accepts a benign fixture.
+    policy = dict(POLICY, protected_tags=["sacred"])
+    store = InMemoryStore()
+    cloud = MemoryCloud(store=store, policy=policy)
+    authority = cloud.claim_tag_authority()
+    hook_calls: list = []
+
+    def recording_hook(record):
+        hook_calls.append(record)
+        return True
+
+    cloud.claim_write_hook(recording_hook)
+
+    refused = cloud.remember(
+        kind="semantic", content="a benign fixture",
+        source="curator", stage="intake", owner="shared",
+        tags=["field-note", "sacred"],
+    )
+    assert refused is None
+    assert cloud.last_tag_refusals == ["sacred"]
+    assert store.all() == []
+    assert hook_calls == []
+
+    admitted = cloud.remember(
+        kind="semantic", content="a benign fixture",
+        source="curator", stage="intake", owner="shared",
+        tags=["field-note", "sacred"], _authority=authority,
+    )
+    assert admitted is not None
+    assert len(hook_calls) == 1
+    stored = next(r for r in store.all() if r.id == admitted.id)
+    assert set(stored.tags) == {"field-note", "sacred"}
