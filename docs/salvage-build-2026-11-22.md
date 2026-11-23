@@ -78,3 +78,47 @@ Nov 23, 2026 — stated, not implied):**
   and close. It does not establish power-loss
   durability; file close alone is not evidence the
   quarantine data reached durable storage.
+
+## Fix round — Linear's hold on 75ac36d (Nov 23, 2026)
+
+Linear's static review held the pushed head with three
+preservation defects; his four probe cases were run verbatim
+against the unmodified code first and FAILED 4/4, then passed
+4/4 after the fixes. All four are permanent tests in
+tests/test_salvage.py, alongside Perplexity's process-kill
+regression (a different failure boundary — retained).
+
+1. **Torn tail.** The quarantine append did not ensure a
+   newline separator: a partial last line, or a complete
+   entry whose final newline never landed, concatenated with
+   the next entry and the combined line parsed as nothing —
+   salvage could remove a record and report success with no
+   parseable evidence. Fix: before appending, a non-empty
+   side file not ending in a newline is terminated first.
+2. **Payload-keyed dedupe.** Idempotency keyed on record id
+   alone suppressed different evidence: a record whose
+   corruption changed between attempts was removed on retry
+   without its new payload being preserved. Fix: dedupe keys
+   on the record's full payload (canonical JSON); identical
+   retries still preserve exactly once.
+3. **Exact-record removal.** Salvage classified individual
+   records but removed by id, deleting every record sharing
+   the id — a corrupt copied-id twin took its honest
+   original with it. Fix: a store-level `remove_one(record)`
+   removes a single occurrence matched on full payload
+   (JsonFileStore: first equal entry in the sequence;
+   InMemoryStore: the payload-checked entry under the id);
+   salvage removes exactly the records it classified, and
+   the survivor sequence is preserved.
+
+Suite after the round: 322. Perplexity's interruption probe
+and snapshot regression re-run after the fixes: both PASS.
+
+Composition, corrected on Linear's note: this branch's tree
+also carries experiments/sandbox_real_session.py (the Phase
+1.4 real-model session harness, stacked here since Nov 22 —
+the session run-sheet checks out this branch) and a
+docs/policy-decisions-2026-11-22.md that differs from main
+(it records Decision 4, the salvage authorization itself).
+Both are declared in this round's scope explicitly; the
+earlier "nothing else differs" phrasing is withdrawn.

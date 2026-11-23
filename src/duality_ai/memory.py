@@ -243,6 +243,22 @@ class MemoryStore(ABC):
     def remove(self, record_id: str) -> bool:
         """Remove the record with this id. Returns True if one was."""
 
+    def remove_one(self, record: MemoryRecord) -> bool:
+        """Remove ONE occurrence of this exact record.
+
+        Matches on the record's full payload, not its id
+        alone: two records may share an id (a corrupt
+        copied-id twin beside its honest original), and
+        removing by id would take both. This default serves
+        stores where ids are unique; list-backed stores
+        override it to remove a single occurrence from the
+        sequence.
+        """
+        stored = self.get(record.id)
+        if stored is not None and stored.to_dict() == record.to_dict():
+            return self.remove(record.id)
+        return False
+
 
 def _matches(
     record: MemoryRecord,
@@ -279,6 +295,13 @@ class InMemoryStore(MemoryStore):
 
     def remove(self, record_id: str) -> bool:
         return self._records.pop(record_id, None) is not None
+
+    def remove_one(self, record: MemoryRecord) -> bool:
+        stored = self._records.get(record.id)
+        if stored is not None and stored.to_dict() == record.to_dict():
+            del self._records[record.id]
+            return True
+        return False
 
 
 class JsonFileStore(MemoryStore):
@@ -626,6 +649,34 @@ class JsonFileStore(MemoryStore):
                 raise
             return True
 
+    def remove_one(self, record: MemoryRecord) -> bool:
+        """Remove a single occurrence of this exact record.
+
+        Salvage classifies individual records, and a list
+        store can hold two records under one id (an honest
+        original and a corrupt copied-id twin): remove() by
+        id would delete both. This removes the first entry
+        whose full payload equals the given record's, and
+        nothing else (Linear's salvage hold, Nov 23, 2026).
+        """
+        with self._locked():
+            if not self._batching:
+                self._reload_locked()
+            target = record.to_dict()
+            for index, stored in enumerate(self._records):
+                if stored.to_dict() == target:
+                    del self._records[index]
+                    break
+            else:
+                return False
+            try:
+                self._save()
+            except BaseException:
+                if not self._batching:
+                    self._reload_locked()
+                raise
+            return True
+
 
 # ---------------------------------------------------------------------------
 # The cloud — the authored core facade
@@ -895,10 +946,16 @@ class MemoryCloud:
           removed from the store and preserved VERBATIM in a
           JSON-lines side file the operator names — evidence,
           never deleted, never resealed over. The append is
-          idempotent: a repair interrupted after the append
-          but before the batch commits is retried against the
-          same degraded store, and each record is preserved
-          exactly once.
+          idempotent per exact payload: a repair interrupted
+          after the append but before the batch commits is
+          retried against the same degraded store, and each
+          record's exact payload is preserved exactly once —
+          while a record whose corruption changed between
+          attempts is new evidence and is preserved again.
+          Removal is by exact record, never by id alone, so
+          the survivor sequence is preserved (an honest
+          original that shares an id with a corrupt twin
+          survives its twin's removal).
         - A record whose own seal verifies but whose LINKAGE
           is broken (an out-of-band deletion or insertion
           shifted the chain) is kept; the chain is resealed
@@ -944,16 +1001,18 @@ class MemoryCloud:
             if quarantined:
                 path = Path(quarantine_path)
                 # Idempotent evidence (Perplexity's interruption
-                # acceptance test, Nov 23, 2026): the batch
-                # commits AFTER this append, so a repair killed
-                # between the two is retried against the same
-                # degraded store and would preserve the same
-                # record a second time — one incident reading
-                # as two in the side file. Ids already preserved
-                # are not appended again. A line that does not
-                # parse (a write torn by the kill itself)
-                # preserves nothing and does not block the
-                # retry's full append.
+                # acceptance test, Nov 23, 2026; Linear's salvage
+                # hold, same day): the batch commits AFTER this
+                # append, so a repair killed between the two is
+                # retried against the same degraded store.
+                # Preservation is keyed on the record's FULL
+                # payload, never its id alone: an identical
+                # retry preserves nothing twice, but a record
+                # whose corruption CHANGED between attempts is
+                # different evidence and is preserved again —
+                # id-only dedupe silently destroyed it. A line
+                # that does not parse (a write torn by the kill
+                # itself) preserves nothing and blocks nothing.
                 preserved: set = set()
                 if path.exists():
                     with path.open(encoding="utf-8") as handle:
@@ -963,23 +1022,46 @@ class MemoryCloud:
                             except ValueError:
                                 continue
                             kept = entry.get("record") or {}
-                            if kept.get("id"):
-                                preserved.add(kept["id"])
+                            if kept:
+                                preserved.add(
+                                    json.dumps(kept, sort_keys=True)
+                                )
                 fresh = [
                     (record, reason)
                     for record, reason in quarantined
-                    if record.id not in preserved
+                    if json.dumps(asdict(record), sort_keys=True)
+                    not in preserved
                 ]
                 if fresh:
+                    # A torn tail must not swallow the new
+                    # evidence: if the side file does not end
+                    # in a newline (a partial line, or a whole
+                    # entry whose final newline never landed),
+                    # the first append would concatenate onto
+                    # it and the combined line would parse as
+                    # nothing. Terminate the tail first.
+                    separator = ""
+                    if path.exists() and path.stat().st_size > 0:
+                        with path.open("rb") as tail:
+                            tail.seek(-1, os.SEEK_END)
+                            if tail.read(1) != b"\n":
+                                separator = "\n"
                     with path.open("a", encoding="utf-8") as handle:
+                        if separator:
+                            handle.write(separator)
                         for record, reason in fresh:
                             handle.write(json.dumps({
                                 "quarantined_at": stamp,
                                 "reason": reason,
                                 "record": asdict(record),
                             }) + "\n")
+                # Remove exactly the classified records — the
+                # survivor sequence is preserved, never delete
+                # by id: a corrupt copied-id twin must not take
+                # its honest original down with it (Linear's
+                # hold, finding 3).
                 for record, _reason in quarantined:
-                    self.store.remove(record.id)
+                    self.store.remove_one(record)
             if quarantined or gaps:
                 self._reseal_chain()
             event = MemoryRecord(

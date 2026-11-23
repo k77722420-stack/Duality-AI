@@ -15,6 +15,14 @@ SIGKILLed after the quarantine append but before the batch
 commit must publish nothing — the reopened store is the
 original degraded one — and its retry must complete the
 repair without preserving the same record twice.
+
+The last three are Linear's preservation cases (his hold on
+75ac36d, Nov 23, 2026), kept verbatim in substance: a torn
+quarantine tail must not swallow the next entry, a changed
+corruption must be preserved on retry (payload-keyed
+dedupe, not id-only), and a corrupt copied-id twin must not
+take its honest original down with it (exact-record
+removal, never delete-by-id).
 """
 
 import json
@@ -23,6 +31,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -253,3 +262,97 @@ def test_interrupted_salvage_publishes_nothing_and_retry_preserves_once(
     assert len(victim_entries) == 1
     assert victim_entries[0]["record"]["content"] == "tampered words"
     assert victim_entries[0]["reason"] == "seal_mismatch"
+
+
+# -- Linear's preservation cases (hold on 75ac36d) -------------
+
+
+def _fresh_file_cloud(path):
+    return MemoryCloud(store=JsonFileStore(path))
+
+
+def _damaged_file_store(tmp_path):
+    path = tmp_path / "store.json"
+    cloud = _fresh_file_cloud(path)
+    for i in range(3):
+        assert cloud.remember("semantic", f"honest-{i}", "review")
+    data = json.loads(path.read_text())
+    data[1]["content"] = "corruption-v1"
+    path.write_text(json.dumps(data))
+    assert not _fresh_file_cloud(path).verify_chain()
+    return path, data
+
+
+def _quarantine_entries(path):
+    result = []
+    for line in path.read_text().splitlines():
+        try:
+            result.append(json.loads(line))
+        except json.JSONDecodeError:
+            pass
+    return result
+
+
+@pytest.mark.parametrize("complete_tail", [False, True])
+def test_tail_cannot_swallow_evidence(tmp_path, complete_tail):
+    path, data = _damaged_file_store(tmp_path)
+    quarantine = tmp_path / "quarantine.jsonl"
+    prior = {
+        "quarantined_at": "earlier",
+        "reason": "seal_mismatch",
+        "record": dict(data[0], id="earlier-incident"),
+    }
+    tail = (
+        json.dumps(prior) if complete_tail
+        else '{"quarantined_at":"unfinished'
+    )
+    quarantine.write_text(tail)  # No final newline.
+    assert _fresh_file_cloud(path).salvage(quarantine)["status"] == "repaired"
+    assert _fresh_file_cloud(path).verify_chain()
+    assert any(
+        e["record"] == data[1] for e in _quarantine_entries(quarantine)
+    )
+
+
+def test_changed_corruption_is_preserved_on_retry(tmp_path):
+    path, data = _damaged_file_store(tmp_path)
+    quarantine = tmp_path / "quarantine.jsonl"
+    before = path.read_bytes()
+    with patch(
+        "duality_ai.memory.os.replace",
+        side_effect=OSError("publication failure"),
+    ):
+        with pytest.raises(OSError):
+            _fresh_file_cloud(path).salvage(quarantine)
+    assert path.read_bytes() == before
+    assert _quarantine_entries(quarantine)[0]["record"] == data[1]
+
+    # Offline change between attempts; no concurrent writer.
+    data[1]["content"] = "corruption-v2"
+    path.write_text(json.dumps(data))
+    assert _fresh_file_cloud(path).salvage(quarantine)["status"] == "repaired"
+    assert _fresh_file_cloud(path).verify_chain()
+    assert any(
+        e["record"] == data[1] for e in _quarantine_entries(quarantine)
+    )
+
+
+def test_corrupt_twin_does_not_delete_honest_original(tmp_path):
+    path = tmp_path / "twins.json"
+    cloud = _fresh_file_cloud(path)
+    assert cloud.remember("semantic", "honest original", "review")
+    honest = json.loads(path.read_text())[0]
+    twin = dict(honest)
+    twin["content"] = "corrupted copied-id twin"
+    twin["prev_hash"] = honest["record_hash"]
+    path.write_text(json.dumps([honest, twin]))
+
+    cloud = _fresh_file_cloud(path)
+    assert [r.content for r in cloud.recall()] == ["honest original"]
+    quarantine = tmp_path / "quarantine.jsonl"
+    assert cloud.salvage(quarantine)["status"] == "repaired"
+    assert _fresh_file_cloud(path).verify_chain()
+    assert _quarantine_entries(quarantine)[0]["record"] == twin
+    assert any(
+        r.to_dict() == honest for r in _fresh_file_cloud(path).store.all()
+    )
