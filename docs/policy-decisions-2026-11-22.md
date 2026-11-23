@@ -31,3 +31,48 @@ If the provenance chain ever breaks — a record altered outside the system's co
 ## What this unblocks
 
 The merge gate is now fully satisfied on every side: Linear's verdict (MERGE, ninth look, Nov 22, 2026), the storage verifications (TEC-5 accepted, TEC-6 closed), and both owner decisions (this record). The merge itself proceeds on Ken's word, as every push has. The two follow-up builds (stop records; the salvage-repair procedure) are scoped by this record and land as their own reviewed rounds.
+
+---
+
+## Addendum — Decision 3: the reuse policy (Ken, Nov 22, 2026, evening)
+
+**Question** (raised by Perplexity's pruning probe, run the same
+evening on `a1343ce`): a quotation embedded in a surviving record
+outlives its pruned source and re-enters assembled recall. Does
+reuse require the quotation's own current eligibility?
+
+**Perplexity's recommendation:** yes, for model-facing recall —
+quoted material needs current reuse eligibility; unverifiable
+quotations are omitted from model input; the filter sits at
+model-input construction, and the policy must name the surface
+it protects. She did not recommend filtering structured recall
+itself.
+
+**Ken's decision: STRICTER — the filter applies at BOTH
+surfaces.** A quotation embedded in a record is served only
+while its source record still exists and verifies:
+
+1. **Structured recall assembly** — when a run assembles its
+   recall, embedded `recalled` entries whose referenced source
+   is gone (pruned, never existed) or fails verification are
+   dropped from the served copy. The drops are surfaced in the
+   run's result (`recall_quotation_drops`), never hidden.
+2. **Model-input construction** — when seam 1 is wired, the
+   model receives only the assembled, already-filtered recall;
+   Perplexity's two-case A/B test (positive control with the
+   source present; pruned case asserting absence from every
+   model-bound call) is the acceptance gate for that wiring.
+
+**The archive is not a surface.** Stored records are never
+rewritten by the filter; a surviving record keeps its embedded
+quotations as stored evidence. The policy governs what recall
+SERVES, not what memory HOLDS — the same distinction the probe
+measured (retention vs recall vs model exposure).
+
+**Status:** surface 1 implemented and tested the same evening
+(`tests/test_reuse_policy_filter.py`; the probe re-run shows
+boundary 2a flip from True to False under the policy, boundary
+1 unchanged). Surface 2 is a recorded gate on a future build,
+not present behavior. The merge gate for the current branch is
+unchanged: this decision is not a gate on it (Perplexity's own
+framing, adopted).

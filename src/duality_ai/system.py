@@ -213,6 +213,53 @@ def _recalled_evidence(entry: dict) -> dict:
     return evidence
 
 
+def _filter_dead_quotations(content: str, eligible_ids: set) -> tuple:
+    """Apply the reuse policy to one served recall summary's content.
+
+    Ken's reuse-policy decision (Nov 22, 2026 — adopted stricter
+    than the reviewer's recommendation): a quotation embedded in
+    a record is served only while its source record still exists
+    and verifies. ``eligible_ids`` is the set of record ids the
+    cloud itself serves as verified. An episode payload's
+    ``recalled`` entries whose referenced id is not in that set —
+    pruned, never existed, or seal-failed — are dropped from the
+    SERVED copy, at both surfaces the policy names: the assembled
+    recall itself, and (when seam 1 is wired) model-input
+    construction, which will consume this same assembled recall.
+    The stored record is never rewritten: the archive is not the
+    surface the policy governs. Returns the possibly filtered
+    content and the dropped entry ids; content that is not an
+    episode payload, or in which nothing is dropped, comes back
+    byte-identical.
+    """
+    try:
+        parsed = json.loads(content)
+    except (ValueError, TypeError, RecursionError):
+        return content, []
+    if not isinstance(parsed, dict):
+        return content, []
+    recalled = parsed.get("recalled")
+    if not isinstance(recalled, dict):
+        return content, []
+    dropped: list = []
+    changed = False
+    for shelf, entries in recalled.items():
+        if not isinstance(entries, list):
+            continue
+        kept = []
+        for entry in entries:
+            entry_id = entry.get("id") if isinstance(entry, dict) else None
+            if entry_id in eligible_ids:
+                kept.append(entry)
+            else:
+                dropped.append(entry_id)
+                changed = True
+        recalled[shelf] = kept
+    if not changed:
+        return content, []
+    return json.dumps(parsed), dropped
+
+
 # The inspection machinery — the error, the inspection parse,
 # the decoding walk, and the judged-signals union — moved to
 # the shared inspection module (inspection.py, Linear
@@ -286,6 +333,9 @@ class DualitySystem:
         # Ids the most recent run's recall excluded because their
         # provenance seal did not verify (memory layer, recall()).
         self.last_recall_exclusions: list[str] = []
+        # Quotation source ids the most recent run's recall dropped
+        # under the reuse policy (source gone or unverifiable).
+        self.last_recall_quotation_drops: list[str] = []
 
     # -- the guarded door (movement 7's other half) -------------------
 
@@ -551,30 +601,47 @@ class DualitySystem:
         Returns record summaries (identity, provenance, tags, current
         decayed strength, content) for the logical, creative, and
         shared shelves, strongest first — shown in the run's result,
-        not consumed by the skeleton pipeline (seam 1).
+        not consumed by the skeleton pipeline (seam 1). Embedded
+        quotations are served under the reuse policy (Ken's
+        decision, Nov 22, 2026): a quotation whose source record no
+        longer exists or no longer verifies is dropped from the
+        served copy and surfaced on ``last_recall_quotation_drops``;
+        the stored records are never rewritten by the filter.
         """
         recall: dict[str, list[dict]] = {}
         excluded: list[str] = []
+        # Reuse policy (Ken's decision, Nov 22, 2026): the ids the
+        # cloud itself serves as verified are the quotations'
+        # eligibility set. Computed once, before the shelf reads.
+        eligible_ids = {record.id for record in self.cloud.recall()}
+        quotation_drops: list = []
         for shelf in ("logical", "creative", "shared"):
             records = self.cloud.recall(owner=shelf)
             # The cloud excludes records whose provenance seal does
             # not verify; surface the exclusions, never hide them.
             excluded.extend(self.cloud.last_recall_exclusions)
-            recall[shelf] = [
-                {
-                    "id": record.id,
-                    "kind": record.kind,
-                    "owner": record.owner,
-                    "source": record.source,
-                    "stage": record.stage,
-                    "tags": list(record.tags),
-                    "created_at": record.created_at,
-                    "strength": record.strength,
-                    "content": record.content,
-                }
-                for record in records
-            ]
+            summaries = []
+            for record in records:
+                content, drops = _filter_dead_quotations(
+                    record.content, eligible_ids
+                )
+                quotation_drops.extend(drops)
+                summaries.append(
+                    {
+                        "id": record.id,
+                        "kind": record.kind,
+                        "owner": record.owner,
+                        "source": record.source,
+                        "stage": record.stage,
+                        "tags": list(record.tags),
+                        "created_at": record.created_at,
+                        "strength": record.strength,
+                        "content": content,
+                    }
+                )
+            recall[shelf] = summaries
         self.last_recall_exclusions = excluded
+        self.last_recall_quotation_drops = quotation_drops
         return recall
 
     # -- the barrier's sizing input -------------------------------------
@@ -721,6 +788,9 @@ class DualitySystem:
             "prompt": trace["prompt"],
             "recall": recall,
             "recall_exclusions": list(self.last_recall_exclusions),
+            "recall_quotation_drops": list(
+                self.last_recall_quotation_drops
+            ),
             "pipeline": trace,
             "decision": trace["decision"],
             "released": trace["released"],
