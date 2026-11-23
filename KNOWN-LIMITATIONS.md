@@ -450,7 +450,16 @@ may drop, which fails closed, in the policy's direction;
 (c) a plain record whose content is itself a quotation envelope
 is the one shape where the embedder's input and the door's
 recomputation can diverge, and there too the failure is a
-refusal, never a silent pass. Tests:
+refusal, never a silent pass; (d) binding authenticates the
+IMMEDIATE source only (Perplexity's verdict on this fix,
+Nov 22, 2026): a correctly attributed excerpt may itself
+contain text its source copied from somewhere else, and
+binding does not establish the current reuse eligibility of
+every upstream source represented within that text — "this is
+genuinely B's text" and "all material within B is currently
+eligible for reuse" remain different claims, the
+derived-content policy governs the broader question, and this
+fix claims no recursive provenance enforcement. Tests:
 tests/test_provenance_binding.py.
 
 ## 20. The write hook was silently replaceable — ADDRESSED Nov 22, 2026
