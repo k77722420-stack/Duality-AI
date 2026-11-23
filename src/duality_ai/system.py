@@ -215,6 +215,53 @@ def _recalled_evidence(entry: dict) -> dict:
     return evidence
 
 
+def _precedent_block(recall: dict) -> str:
+    """Render the assembled recall as model-facing precedent text.
+
+    Seam 1 (Nov 22, 2026): the text the pipeline may show a
+    model, built ONLY from the served recall — the copy already
+    filtered under the reuse policy (Ken's Decision 3, surface
+    2) and binding-checked. Each served entry contributes its
+    evidence line (an excerpt, or a prior episode's decision),
+    and each SURVIVING embedded quotation contributes its own
+    line beneath it; a quotation the filter dropped is absent
+    here because it is absent from the served content this
+    renders. Bounded like the episode embedding: at most
+    _RECALL_EMBED_LIMIT entries per shelf, and every value
+    already capped at the embedding bound.
+    """
+    lines: list[str] = []
+    for shelf in ("logical", "creative", "shared"):
+        for entry in recall.get(shelf, [])[:_RECALL_EMBED_LIMIT]:
+            evidence = _recalled_evidence(entry)
+            if "excerpt" in evidence:
+                lines.append(f"- [{entry['kind']}] {evidence['excerpt']}")
+            else:
+                lines.append(
+                    "- [episode] prior run — decision: "
+                    f"{evidence.get('decision', 'unknown')}"
+                )
+            try:
+                parsed = json.loads(entry["content"])
+            except (ValueError, TypeError, RecursionError):
+                parsed = None
+            if isinstance(parsed, dict):
+                embedded = parsed.get("recalled") or {}
+                for sub_entries in embedded.values():
+                    for sub in sub_entries[:_RECALL_EMBED_LIMIT]:
+                        if "excerpt" in sub:
+                            lines.append(
+                                f"  - quoted [{sub['kind']}]: "
+                                f"{sub['excerpt']}"
+                            )
+                        elif "decision" in sub:
+                            lines.append(
+                                "  - quoted [episode]: decision "
+                                f"{sub['decision']}"
+                            )
+    return "\n".join(lines)
+
+
 # The stop record's allowlist schema (TEC-12 design, Nov 22,
 # 2026). A stop record's payload is built ONLY from these keys —
 # system-derived metadata about a gate stop: identities, the
@@ -868,8 +915,10 @@ class DualitySystem:
 
         Returns record summaries (identity, provenance, tags, current
         decayed strength, content) for the logical, creative, and
-        shared shelves, strongest first — shown in the run's result,
-        not consumed by the skeleton pipeline (seam 1). Embedded
+        shared shelves, strongest first — shown in the run's result
+        and, since seam 1 was wired (Nov 22, 2026), rendered from
+        this same served copy into the pipeline's model input.
+        Embedded
         quotations are served under the reuse policy (Ken's
         decision, Nov 22, 2026): a quotation whose source record no
         longer exists or no longer verifies is dropped from the
@@ -960,7 +1009,11 @@ class DualitySystem:
         recall = self._recall_precedent()
 
         # Movements 3–5 — the core: hemispheres, hub, morality gate.
-        trace = self.pipeline.run(prompt)
+        # Seam 1 (Nov 22, 2026): the assembled recall crosses into
+        # the pipeline as rendered precedent text — built from the
+        # served, reuse-filtered copy above, never from the store.
+        precedent = _precedent_block(recall)
+        trace = self.pipeline.run(prompt, precedent=precedent or None)
         proposal = trace["proposal"]
 
         # Movement 6 — release: the barrier responds to the judged
