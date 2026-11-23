@@ -357,7 +357,7 @@ class DualitySystem:
         self.last_recall_exclusions: list[str] = []
         # Quotation source ids the most recent run's recall dropped
         # under the reuse policy (source gone or unverifiable).
-        self.last_recall_quotation_drops: list[str] = []
+        self.last_recall_quotation_drops: list[str | None] = []
 
     # -- the guarded door (movement 7's other half) -------------------
 
