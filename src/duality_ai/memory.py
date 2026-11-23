@@ -945,6 +945,16 @@ class MemoryCloud:
         snapshot = self.store.all()
         verified = {id(r) for r in self._verified_records(snapshot)}
         found = [r for r in snapshot if _matches(r, kind, owner, tag)]
+        # Stop records are NOT eligible for ordinary recall
+        # (TEC-12 design, Nov 22, 2026): they are an audit trail,
+        # consumed only through a dedicated read path when one
+        # is built — never served as precedent, whatever shelf
+        # or kind a caller asks for. The exclusion lives here,
+        # at the memory layer, so every recall consumer inherits
+        # it (review fix, Nov 22, 2026: shelf selection in the
+        # system layer alone let an imported stop record into
+        # assembled recall and poisoned the next episode write).
+        found = [r for r in found if r.kind != "stop"]
         if text is not None:
             needle = text.lower()
             found = [r for r in found if needle in r.content.lower()]

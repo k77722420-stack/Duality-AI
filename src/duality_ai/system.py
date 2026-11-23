@@ -669,11 +669,7 @@ class DualitySystem:
         recalled = parsed.get("recalled")
         if not isinstance(recalled, dict):
             return True
-        verified = {
-            r.id: r
-            for r in self.cloud.recall()
-            if r.kind != "stop"
-        }
+        verified = {r.id: r for r in self.cloud.recall()}
         eligible_ids = set(verified)
         for entries in recalled.values():
             if not isinstance(entries, list):
@@ -885,9 +881,7 @@ class DualitySystem:
         # Reuse policy (Ken's decision, Nov 22, 2026): the ids the
         # cloud itself serves as verified are the quotations'
         # eligibility set. Computed once, before the shelf reads.
-        verified = [
-            r for r in self.cloud.recall() if r.kind != "stop"
-        ]
+        verified = self.cloud.recall()
         eligible_ids = {record.id for record in verified}
         # Provenance binding (Nov 22, 2026): the genuine embedding
         # of every verified record, recomputed once per run, so
@@ -1121,6 +1115,31 @@ class DualitySystem:
         """
         fingerprint = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
         step_id = "morality_gate"
+        # The lookup, the idempotency decision, and the write
+        # happen inside ONE store batch and ONE failure boundary
+        # (review fixes, Nov 22, 2026): a lookup error reports
+        # "failed" like any other audit-write failure, instead
+        # of escaping run(); and on a file store the batch
+        # reloads once at entry, so the idempotency check reads
+        # the committed state — a second instance opened before
+        # the first write cannot record the same stop twice
+        # from its stale snapshot.
+        try:
+            with self.cloud._store_batch():
+                return self._record_stop_in_batch(
+                    prompt=prompt,
+                    proposal=proposal,
+                    gate_output=gate_output,
+                    run_id=run_id,
+                    fingerprint=fingerprint,
+                    step_id=step_id,
+                )
+        except Exception:
+            return {"status": "failed", "record_id": None}
+
+    def _record_stop_in_batch(
+        self, *, prompt, proposal, gate_output, run_id, fingerprint, step_id
+    ):
         for existing in self.cloud.store.find(kind="stop"):
             try:
                 prior = json.loads(existing.content)
@@ -1159,17 +1178,14 @@ class DualitySystem:
         self._stop_write_digests.add(
             hashlib.sha256(content.encode("utf-8")).hexdigest()
         )
-        try:
-            record = self.cloud.remember(
-                kind="stop",
-                content=content,
-                source="gate",
-                stage="stop-record",
-                owner="barrier",
-                tags=["stop-record"],
-            )
-        except Exception:
-            return {"status": "failed", "record_id": None}
+        record = self.cloud.remember(
+            kind="stop",
+            content=content,
+            source="gate",
+            stage="stop-record",
+            owner="barrier",
+            tags=["stop-record"],
+        )
         if record is None:
             return {"status": "failed", "record_id": None}
         return {"status": "recorded", "record_id": record.id}

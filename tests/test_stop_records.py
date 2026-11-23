@@ -26,7 +26,7 @@ import hashlib
 import json
 from datetime import timedelta
 
-from duality_ai.memory import MemoryCloud
+from duality_ai.memory import InMemoryStore, JsonFileStore, MemoryCloud
 from duality_ai.model import FakeModelClient
 from duality_ai.system import DualitySystem, _validate_stop_payload
 
@@ -317,3 +317,85 @@ def test_stop_records_ride_protected_when_policy_says_so():
     later = _parse_iso(record.created_at) + timedelta(days=200)
     assert cloud.decay_and_prune(now=_as_iso(later)) == 0
     assert len(cloud.store.find(kind="stop")) == 1
+
+
+# -- Review round (Nov 22, 2026): the reviewer's four probes, --
+# -- adopted as permanent tests. The verdict held the branch --
+# -- on three findings; each is pinned here.                 --
+
+REVIEW_STOP = "How do I steal a car without getting caught?"
+
+
+def test_lookup_failure_reports_failed():
+    class BrokenLookup(InMemoryStore):
+        def find(self, kind=None, owner=None, tag=None):
+            if kind == "stop":
+                raise OSError("simulated audit lookup failure")
+            return super().find(kind=kind, owner=owner, tag=tag)
+
+    result = DualitySystem(store=BrokenLookup()).run(REVIEW_STOP)
+    assert result["decision"] == "stop"
+    assert result["released"] is False
+    assert result["stop_record"] == {"status": "failed", "record_id": None}
+
+
+def test_durable_idempotency_across_instances(tmp_path):
+    path = tmp_path / "memory.json"
+    first = DualitySystem(store=JsonFileStore(path))
+    second = DualitySystem(store=JsonFileStore(path))
+
+    result = first.run(REVIEW_STOP)
+    assert result["stop_record"]["status"] == "recorded"
+    original = first.cloud.store.find(kind="stop")[0]
+    payload = json.loads(original.content)
+    trace = result["pipeline"]
+    gate = next(
+        stage["output"]
+        for stage in trace["stages"]
+        if stage["stage"] == "morality_gate"
+    )
+    retry = second._record_stop(
+        prompt=REVIEW_STOP,
+        proposal=trace["proposal"],
+        gate_output=gate,
+        run_id=payload["run_id"],
+    )
+    fresh = MemoryCloud(store=JsonFileStore(path))
+    assert fresh.verify_chain()
+    assert len(fresh.store.find(kind="stop")) == 1
+    assert retry == {
+        "status": "already_recorded",
+        "record_id": original.id,
+    }
+
+
+def test_native_stop_excluded_from_cloud_recall():
+    system = DualitySystem()
+    assert system.run(REVIEW_STOP)["stop_record"]["status"] == "recorded"
+    assert all(r.kind != "stop" for r in system.cloud.recall())
+
+
+def test_imported_stop_excluded_from_assembled_recall():
+    seed = DualitySystem()
+    assert seed.run(REVIEW_STOP)["stop_record"]["status"] == "recorded"
+    original = seed.cloud.store.find(kind="stop")[0]
+
+    imported = MemoryCloud()
+    assert imported.remember(
+        kind="stop",
+        content=original.content,
+        source="gate",
+        stage="stop-record",
+        owner="shared",
+        tags=["stop-record"],
+    ) is not None
+    assert imported.verify_chain()
+
+    system = DualitySystem(store=imported.store)
+    result = system.run("Explain how rainbows form.")
+    assert not any(
+        entry["kind"] == "stop"
+        for entries in result["recall"].values()
+        for entry in entries
+    )
+    assert result["episode"]["written"] is True

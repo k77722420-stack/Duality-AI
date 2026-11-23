@@ -63,3 +63,38 @@ reversible by a later decision.
   now selects the episode record by kind instead of taking
   the last record). No assertion's intent was weakened.
 - Suite: 273 → 283, all passing locally at the build commit.
+
+## Review round (Nov 22, 2026) — three findings, fixed
+
+The first review held the branch on three boundary findings;
+each was reproduced with the reviewer's exact probes before
+fixing, and the probes are now permanent tests
+(tests/test_stop_records.py):
+
+1. **Audit lookup failures escaped run().** The idempotency
+   scan ran outside the failure boundary. Fix: the lookup,
+   the idempotency decision, and the write now happen inside
+   one try, and a lookup error reports `stop_record:
+   "failed"` like any other audit-write failure.
+2. **Idempotency could fail across file-store instances.**
+   Two instances opened before the first write each checked
+   their own snapshot. Fix: the same restructure runs the
+   scan and the write inside the store's maintenance batch
+   (TEC-6 machinery), which reloads once at entry — the
+   check reads committed state, and the append lands in the
+   same transaction. The reviewer's cross-instance probe
+   passes: one record, chain verified, `already_recorded`.
+3. **Recall exclusion lived in the wrong layer.** The
+   system's eligibility maps filtered stops, but shelf
+   selection and `cloud.recall()` did not — an imported
+   shared-shelf stop entered assembled recall and poisoned
+   the next episode write (its embedded evidence failed the
+   door's binding check). Fix: the exclusion now lives in
+   `MemoryCloud.recall()` itself — ordinary recall never
+   serves a stop record, whatever is asked; the system-layer
+   filters were removed as redundant. This is the design's
+   own placement: stop records are not eligible for ordinary
+   recall, full stop; the dedicated read path, when built,
+   will read the store directly.
+
+Suite after the review round: 287.
