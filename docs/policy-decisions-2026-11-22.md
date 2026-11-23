@@ -72,7 +72,12 @@ measured (retention vs recall vs model exposure).
 **Status:** surface 1 implemented and tested the same evening
 (`tests/test_reuse_policy_filter.py`; the probe re-run shows
 boundary 2a flip from True to False under the policy, boundary
-1 unchanged). Surface 2 is a recorded gate on a future build,
+1 unchanged). Surface 2 BUILT Nov 22, 2026: seam 1 is wired
+(docs/seam1-wiring-build-2026-11-22.md) and Perplexity's
+two-case A/B acceptance PASSES — positive control (marker
+reaches the model input with the source present) and pruned
+case (marker absent from every model-bound call). Surface 2
+was a recorded gate on a future build,
 not present behavior. The merge gate for the current branch is
 unchanged: this decision is not a gate on it (Perplexity's own
 framing, adopted).
