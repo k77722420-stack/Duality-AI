@@ -245,13 +245,29 @@ def _precedent_block(recall: dict) -> str:
                 parsed = json.loads(entry["content"])
             except (ValueError, TypeError, RecursionError):
                 parsed = None
-            if isinstance(parsed, dict):
-                embedded = parsed.get("recalled") or {}
+            # The envelope is traversed only at the shapes the
+            # episode contract actually mints (Linear's seam-1
+            # hold, Nov 22, 2026): an ordinary record may carry
+            # any value under a "recalled" key — a list, a
+            # string, a dict of arbitrary shape — because the
+            # write path admits ordinary records without an
+            # envelope contract. Anything that is not a dict of
+            # lists of dicts is that record's own content, not
+            # a quotation envelope, and renders no quoted lines.
+            embedded = (
+                parsed.get("recalled") if isinstance(parsed, dict)
+                else None
+            )
+            if isinstance(embedded, dict):
                 for sub_entries in embedded.values():
+                    if not isinstance(sub_entries, list):
+                        continue
                     for sub in sub_entries[:_RECALL_EMBED_LIMIT]:
+                        if not isinstance(sub, dict):
+                            continue
                         if "excerpt" in sub:
                             lines.append(
-                                f"  - quoted [{sub['kind']}]: "
+                                f"  - quoted [{sub.get('kind')}]: "
                                 f"{sub['excerpt']}"
                             )
                         elif "decision" in sub:
@@ -932,11 +948,27 @@ class DualitySystem:
         the stored records are never rewritten by the filter.
         """
         recall: dict[str, list[dict]] = {}
-        excluded: list[str] = []
+        # ONE verified snapshot per run (Perplexity's Ask 3
+        # recommendation, Nov 22, 2026; built the same evening):
+        # a single cloud.recall() pass verifies, decays, and
+        # sorts the whole store once, and everything this run
+        # needs — the eligibility set, the genuine-embedding
+        # map, the per-shelf precedent — is drawn from that one
+        # snapshot. The previous shape recalled four times (one
+        # global pass plus one per shelf), re-verifying every
+        # seal four times and letting the four reads disagree
+        # about a store changing underneath the run. Partitioning
+        # the snapshot by owner preserves each shelf's
+        # strongest-first order (the snapshot's sort is stable
+        # and global), and the exclusions surface is the single
+        # pass's own list.
+        verified = self.cloud.recall()
+        # The cloud excludes records whose provenance seal does
+        # not verify; surface the exclusions, never hide them.
+        excluded = list(self.cloud.last_recall_exclusions)
         # Reuse policy (Ken's decision, Nov 22, 2026): the ids the
         # cloud itself serves as verified are the quotations'
-        # eligibility set. Computed once, before the shelf reads.
-        verified = self.cloud.recall()
+        # eligibility set.
         eligible_ids = {record.id for record in verified}
         # Provenance binding (Nov 22, 2026): the genuine embedding
         # of every verified record, recomputed once per run, so
@@ -946,12 +978,14 @@ class DualitySystem:
             record.id: _expected_quotation_evidence(record, eligible_ids)
             for record in verified
         }
+        by_shelf: dict[str, list] = {
+            "logical": [], "creative": [], "shared": []
+        }
+        for record in verified:
+            by_shelf[record.owner].append(record)
         quotation_drops: list = []
         for shelf in ("logical", "creative", "shared"):
-            records = self.cloud.recall(owner=shelf)
-            # The cloud excludes records whose provenance seal does
-            # not verify; surface the exclusions, never hide them.
-            excluded.extend(self.cloud.last_recall_exclusions)
+            records = by_shelf[shelf]
             summaries = []
             for record in records:
                 content, drops = _filter_dead_quotations(
