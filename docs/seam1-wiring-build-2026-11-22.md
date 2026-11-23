@@ -82,3 +82,18 @@ proved too little); Case B compares B's stored content
 exactly, before and after; the standalone harness exits
 nonzero on failure. His stronger A/B probe passes verbatim
 (A PASS / B PASS). Suite on this branch: 293 → 294.
+
+## Alignment round (Nov 22, 2026) — Linear's re-verdict
+
+Linear confirmed the crash fixed at 32c421e with no new
+runtime blocker, and kept sign-off pending one verification
+gap: the checked-in acceptance assertions lagged his
+stronger probe. Aligned, test/harness only — no runtime
+code changed: the standalone harness now asserts B's
+specific quotation line in both hemisphere messages and
+compares B's stored content exactly (captured before
+pruning, checked after pruning and after the run); the
+pytest Case B capture likewise starts before pruning and
+compares at both later stages. Harness output now reads
+"B quotation in both model messages=True" and "B stored
+content exact throughout=True"; ACCEPTANCE: PASS, exit 0.

@@ -92,20 +92,23 @@ def test_case_a_positive_control_marker_reaches_the_model():
 
 def test_case_b_pruned_source_marker_reaches_no_model_call():
     store, a_id, b_id = _build_store()
+    # Linear's alignment (seam-1 re-verdict, Nov 22, 2026):
+    # B's content is captured BEFORE pruning and compared
+    # exactly after pruning AND after the run — the full
+    # invariant, not a post-pruning baseline.
+    before = next(r for r in store.all() if r.id == b_id).content
+    assert MARKER in before  # the archive is not a surface
     cloud = MemoryCloud(store=store)
     cloud.decay_and_prune(now=T0 + timedelta(days=40))
     fresh = MemoryCloud(store=store)
     ids = {r.id for r in fresh.store.all()}
     assert a_id not in ids and b_id in ids and fresh.verify_chain()
-    b = next(r for r in store.all() if r.id == b_id)
-    assert MARKER in b.content  # the archive is not a surface
-    before = b.content
+    after_prune = next(r for r in store.all() if r.id == b_id)
+    assert after_prune.content == before
 
     calls: list = []
     system = DualitySystem(store=store, model=_recording_model(calls))
     result = system.run("Give me a plain status summary.")
-    # Linear's correction: B's stored content is compared
-    # EXACTLY, before and after — not just for the marker.
     b_after = next(r for r in store.all() if r.id == b_id)
     assert b_after.content == before
     recall_ids = [
