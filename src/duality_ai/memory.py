@@ -879,6 +879,109 @@ class MemoryCloud:
             if persist is not None:
                 persist(record)
 
+    # -- salvage ---------------------------------------------------------
+
+    def salvage(self, quarantine_path) -> dict:
+        """Repair a broken chain — OPERATOR-INVOKED ONLY.
+
+        The salvage design (docs/salvage-repair-design-2026-11-22.md,
+        Ken's Decision 4): verify_chain() is all-or-nothing, so
+        one corrupt record freezes attestation and maintenance
+        forever, while recall() judges per record and keeps
+        serving the intact past. Salvage is the repair path:
+
+        - A record failing its OWN seal (its stored hash does
+          not recompute from its contents) is quarantined:
+          removed from the store and preserved VERBATIM in a
+          JSON-lines side file the operator names — evidence,
+          never deleted, never resealed over.
+        - A record whose own seal verifies but whose LINKAGE
+          is broken (an out-of-band deletion or insertion
+          shifted the chain) is kept; the chain is resealed
+          over the survivors and each gap is recorded.
+        - The repair appends its own record in-chain —
+          metadata only, the stop-record discipline — so the
+          chain itself attests that a salvage happened and
+          what it cost.
+
+        Salvage never runs from run(), recall(), or
+        maintenance: a repair that fires itself could be made
+        to fire by whoever corrupts a record. A healthy store
+        is a no-op — nothing written, nothing appended.
+        """
+        records = self.store.all()
+        expected_prev = GENESIS_HASH
+        quarantined: list = []
+        gaps: list = []
+        for position, record in enumerate(records):
+            if record.record_hash != record.compute_hash():
+                quarantined.append((record, "seal_mismatch"))
+                continue
+            if record.prev_hash != expected_prev:
+                gaps.append({
+                    "position": position,
+                    "record_id": record.id,
+                    "expected_prev": expected_prev,
+                    "found_prev": record.prev_hash,
+                })
+            expected_prev = record.record_hash
+
+        if not quarantined and not gaps:
+            return {
+                "status": "healthy",
+                "quarantined": [],
+                "gaps": [],
+                "salvage_record_id": None,
+                "chain_verified": self.verify_chain(),
+            }
+
+        stamp = _as_iso(None)
+        with self._store_batch():
+            if quarantined:
+                path = Path(quarantine_path)
+                with path.open("a", encoding="utf-8") as handle:
+                    for record, reason in quarantined:
+                        handle.write(json.dumps({
+                            "quarantined_at": stamp,
+                            "reason": reason,
+                            "record": asdict(record),
+                        }) + "\n")
+                for record, _reason in quarantined:
+                    self.store.remove(record.id)
+            if quarantined or gaps:
+                self._reseal_chain()
+            event = MemoryRecord(
+                id=uuid.uuid4().hex,
+                kind="semantic",
+                owner="shared",
+                content=json.dumps({
+                    "event": "salvage",
+                    "timestamp": stamp,
+                    "quarantined": [
+                        {"id": r.id, "reason": reason}
+                        for r, reason in quarantined
+                    ],
+                    "gaps": gaps,
+                    "kept": len(self.store.all()),
+                }),
+                source="salvage",
+                stage="maintenance",
+                tags=["salvage-event"],
+                created_at=stamp,
+                strength=1.0,
+                prev_hash=self.head_hash(),
+            )
+            event.record_hash = event.compute_hash()
+            self.store.put(event)
+
+        return {
+            "status": "repaired",
+            "quarantined": [r.id for r, _ in quarantined],
+            "gaps": gaps,
+            "salvage_record_id": event.id,
+            "chain_verified": self.verify_chain(),
+        }
+
     # -- decay -----------------------------------------------------------
 
     def _decayed_strength(
