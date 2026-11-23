@@ -982,7 +982,15 @@ class DualitySystem:
             "logical": [], "creative": [], "shared": []
         }
         for record in verified:
-            by_shelf[record.owner].append(record)
+            # Partition only the three precedent shelves
+            # (Linear's hold on b90f58b, Nov 23, 2026): a
+            # verified record may validly belong to another
+            # owner — "barrier" above all — and it stays in
+            # the eligibility set and the evidence map drawn
+            # above, but it is not precedent, and it must
+            # never crash the partition.
+            if record.owner in by_shelf:
+                by_shelf[record.owner].append(record)
         quotation_drops: list = []
         for shelf in ("logical", "creative", "shared"):
             records = by_shelf[shelf]

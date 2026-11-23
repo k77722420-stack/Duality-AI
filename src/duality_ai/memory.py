@@ -894,7 +894,11 @@ class MemoryCloud:
           not recompute from its contents) is quarantined:
           removed from the store and preserved VERBATIM in a
           JSON-lines side file the operator names — evidence,
-          never deleted, never resealed over.
+          never deleted, never resealed over. The append is
+          idempotent: a repair interrupted after the append
+          but before the batch commits is retried against the
+          same degraded store, and each record is preserved
+          exactly once.
         - A record whose own seal verifies but whose LINKAGE
           is broken (an out-of-band deletion or insertion
           shifted the chain) is kept; the chain is resealed
@@ -939,13 +943,41 @@ class MemoryCloud:
         with self._store_batch():
             if quarantined:
                 path = Path(quarantine_path)
-                with path.open("a", encoding="utf-8") as handle:
-                    for record, reason in quarantined:
-                        handle.write(json.dumps({
-                            "quarantined_at": stamp,
-                            "reason": reason,
-                            "record": asdict(record),
-                        }) + "\n")
+                # Idempotent evidence (Perplexity's interruption
+                # acceptance test, Nov 23, 2026): the batch
+                # commits AFTER this append, so a repair killed
+                # between the two is retried against the same
+                # degraded store and would preserve the same
+                # record a second time — one incident reading
+                # as two in the side file. Ids already preserved
+                # are not appended again. A line that does not
+                # parse (a write torn by the kill itself)
+                # preserves nothing and does not block the
+                # retry's full append.
+                preserved: set = set()
+                if path.exists():
+                    with path.open(encoding="utf-8") as handle:
+                        for line in handle:
+                            try:
+                                entry = json.loads(line)
+                            except ValueError:
+                                continue
+                            kept = entry.get("record") or {}
+                            if kept.get("id"):
+                                preserved.add(kept["id"])
+                fresh = [
+                    (record, reason)
+                    for record, reason in quarantined
+                    if record.id not in preserved
+                ]
+                if fresh:
+                    with path.open("a", encoding="utf-8") as handle:
+                        for record, reason in fresh:
+                            handle.write(json.dumps({
+                                "quarantined_at": stamp,
+                                "reason": reason,
+                                "record": asdict(record),
+                            }) + "\n")
                 for record, _reason in quarantined:
                     self.store.remove(record.id)
             if quarantined or gaps:

@@ -8,13 +8,25 @@ past. salvage() is the operator-invoked repair: records
 failing their own seal are quarantined verbatim to a side
 file; linkage-only breaks are resealed with the gap
 recorded; the repair itself is attested in-chain.
+
+The fifth test is Perplexity's interruption acceptance test
+(Nov 23, 2026), run against the persistent backend: a repair
+SIGKILLed after the quarantine append but before the batch
+commit must publish nothing — the reopened store is the
+original degraded one — and its retry must complete the
+repair without preserving the same record twice.
 """
 
 import json
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
 
 import pytest
 
-from duality_ai.memory import InMemoryStore, MemoryCloud
+from duality_ai.memory import InMemoryStore, JsonFileStore, MemoryCloud
 
 
 def _seeded_cloud(n=4):
@@ -108,3 +120,136 @@ def test_maintenance_thaws_after_salvage(tmp_path):
     cloud.salvage(tmp_path / "quarantine.jsonl")
     # After the repair, the same maintenance runs.
     assert cloud.decay_and_prune() >= 0
+
+
+# The salvage child for the interruption test: its reseal
+# sleeps, so the parent's kill lands after the quarantine
+# append has been written and closed — the implementation's
+# durability point for the evidence — but before the store
+# batch commits the repaired chain.
+_SALVAGE_CHILD = """
+import sys, time
+sys.path.insert(0, sys.argv[1])
+import duality_ai.memory as memory
+
+_original = memory.MemoryCloud._reseal_chain
+def _sleepy(self):
+    time.sleep(60)
+    return _original(self)
+memory.MemoryCloud._reseal_chain = _sleepy
+
+store = memory.JsonFileStore(sys.argv[2])
+cloud = memory.MemoryCloud(store=store)
+cloud.salvage(sys.argv[3])
+"""
+
+
+def test_interrupted_salvage_publishes_nothing_and_retry_preserves_once(
+    tmp_path,
+):
+    store_path = tmp_path / "store.json"
+    quarantine = tmp_path / "quarantine.jsonl"
+    cloud = MemoryCloud(store=JsonFileStore(store_path))
+    ids = []
+    for i in range(3):
+        record = cloud.remember(
+            kind="semantic",
+            content=f"honest record {i}",
+            source="test",
+            stage="intake",
+            owner="shared",
+            tags=["seed"],
+        )
+        ids.append(record.id)
+    assert cloud.verify_chain()
+    # Out-of-band tamper in the file itself: the middle
+    # record's content changed, its stored hash did not.
+    data = json.loads(store_path.read_text(encoding="utf-8"))
+    assert data[1]["id"] == ids[1]
+    data[1]["content"] = "tampered words"
+    store_path.write_text(json.dumps(data), encoding="utf-8")
+
+    def fresh():
+        return MemoryCloud(store=JsonFileStore(store_path))
+
+    degraded = fresh()
+    assert not degraded.verify_chain()
+    with pytest.raises(Exception):
+        degraded.decay_and_prune()
+
+    # Salvage in a separate process; terminate by SIGKILL once
+    # the quarantine append is durable — not by an exception
+    # that lets normal cleanup run.
+    child = tmp_path / "salvage_child.py"
+    child.write_text(_SALVAGE_CHILD, encoding="utf-8")
+    repo = Path(__file__).resolve().parents[1]
+    quarantine.touch()
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            str(child),
+            str(repo / "src"),
+            str(store_path),
+            str(quarantine),
+        ],
+        cwd=str(repo),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    deadline = time.time() + 30
+    while quarantine.stat().st_size == 0:
+        if proc.poll() is not None:
+            raise AssertionError(
+                f"salvage child exited early:\n{proc.stdout.read()}"
+            )
+        assert time.time() < deadline, "quarantine append never landed"
+        time.sleep(0.05)
+    proc.send_signal(signal.SIGKILL)
+    proc.wait()
+    assert proc.returncode == -signal.SIGKILL
+
+    # Reopened from a fresh instance: the original degraded
+    # store — no committed salvage event, maintenance still
+    # frozen. The quarantine entry exists but is not a repair.
+    reopened = fresh()
+    assert [r.id for r in reopened.store.all()] == ids
+    assert not reopened.verify_chain()
+    assert not any(r.source == "salvage" for r in reopened.store.all())
+    with pytest.raises(Exception):
+        reopened.decay_and_prune()
+    entries = [
+        json.loads(line)
+        for line in quarantine.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert len(entries) == 1
+    assert entries[0]["record"]["id"] == ids[1]
+
+    # Retry salvage to completion on a fresh instance.
+    report = fresh().salvage(quarantine)
+    assert report["status"] == "repaired"
+    healed = fresh()
+    assert healed.verify_chain()
+    remaining = [r.id for r in healed.store.all()]
+    assert ids[0] in remaining and ids[2] in remaining
+    assert ids[1] not in remaining
+    served = {r.id for r in healed.recall()}
+    assert ids[1] not in served
+    assert ids[0] in served and ids[2] in served
+    events = [r for r in healed.store.all() if r.source == "salvage"]
+    assert len(events) == 1
+    # The evidence is recoverable — and preserved exactly once:
+    # the interrupted attempt's append is the same incident,
+    # not a second one.
+    entries = [
+        json.loads(line)
+        for line in quarantine.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    victim_entries = [
+        e for e in entries if e["record"]["id"] == ids[1]
+    ]
+    assert len(victim_entries) == 1
+    assert victim_entries[0]["record"]["content"] == "tampered words"
+    assert victim_entries[0]["reason"] == "seal_mismatch"

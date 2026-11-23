@@ -54,6 +54,72 @@ def test_the_door_still_verifies_at_the_write_boundary():
     assert len(calls) == 2
 
 
+def test_barrier_owned_memory_never_enters_precedent():
+    # Linear's hold on b90f58b (Nov 23, 2026), his exact
+    # probe as a permanent test: a valid barrier-owned
+    # memory is in the global recall, and the snapshot's
+    # partition indexed by_shelf[record.owner]
+    # unconditionally — KeyError: 'barrier' before the
+    # pipeline ran. The partition now takes only the three
+    # precedent shelves; every verified record stays in
+    # the eligibility set and the evidence map.
+    system = DualitySystem(store=InMemoryStore())
+    record = system.cloud.remember(
+        kind="semantic",
+        content="Routine barrier operating note.",
+        source="review-probe",
+        owner="barrier",
+    )
+    assert record is not None
+    assert system.cloud.verify_chain()
+    assert record.id in {r.id for r in system.cloud.recall()}
+    result = system.run("Explain how rainbows form.")
+    assert result["episode"]["written"] is True
+    assert set(result["recall"]) == {"logical", "creative", "shared"}
+    assert all(
+        entry["id"] != record.id
+        for entries in result["recall"].values()
+        for entry in entries
+    )
+    assert system.cloud.store.get(record.id) is not None
+
+
+def test_snapshot_orders_multiple_survivors_per_shelf():
+    # Linear's coverage correction (Nov 23, 2026): ordering
+    # must be exercised with several surviving records per
+    # shelf, the creative shelf included — not inferred
+    # from single-entry shelves. Insertion order is
+    # deliberately scrambled (his nonblocking note on the
+    # cleared head 2ea73d0): an implementation that merely
+    # preserved insertion order must FAIL this test; only
+    # a real strongest-first sort passes.
+    system = DualitySystem(store=InMemoryStore())
+    cloud = system.cloud
+    seeded = {}
+    for owner, strengths in (
+        ("logical", [0.5, 0.9]),
+        ("creative", [0.25, 0.95, 0.6]),
+        ("shared", [0.4, 0.85]),
+    ):
+        pairs = []
+        for strength in strengths:
+            record = cloud.remember(
+                kind="episodic",
+                content=f"a {owner} note at strength {strength}",
+                source="test",
+                owner=owner,
+                strength=strength,
+            )
+            assert record is not None
+            pairs.append((strength, record.id))
+        seeded[owner] = [
+            rid for _, rid in sorted(pairs, reverse=True)
+        ]
+    recall = system._recall_precedent()
+    for owner, ids in seeded.items():
+        assert [e["id"] for e in recall[owner]] == ids
+
+
 def test_snapshot_keeps_shelves_strengths_and_exclusions():
     system = DualitySystem(store=InMemoryStore())
     cloud = system.cloud
