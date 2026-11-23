@@ -438,14 +438,21 @@ distillation is skipped and the refusal surfaced.
 Bounds, stated plainly: (a) the capability is in-process
 discipline — code holding the cloud and the token can do
 anything, the same bound as the write hook's claim; the boundary
-governs the API's callers, not hostile code in the same process;
+governs the API's callers, not hostile code in the same process.
+The claim establishes exclusive POSSESSION of the capability,
+not claimant IDENTITY: the contract's bootstrap rule is that
+the claim happens during trusted setup, before the cloud is
+exposed to other code (the owning system claims at
+construction; a standalone cloud's curator claims during
+setup) — claim_tag_authority() does not authenticate whoever
+calls it (Perplexity's tag-authority verdict, Nov 22, 2026);
 (b) writes below the cloud (store-level imports) bypass
 remember() entirely, as they bypass the door; (c) the
 `stop-record` tag is deliberately NOT reserved — the stop kind
 carries that authority, and the tag moves no mechanism;
 (d) the API offers no re-tag path (remember/recall return
 copies), so mutation means direct in-process object access,
-inside bound (a). Tests: tests/test_tag_authority.py (11).
+inside bound (a). Tests: tests/test_tag_authority.py (12).
 Three fixtures that seed reserved tags as curators (the prune
 test, the legacy-record test, the running-system demo) were
 updated to claim and present the authority — disclosed in

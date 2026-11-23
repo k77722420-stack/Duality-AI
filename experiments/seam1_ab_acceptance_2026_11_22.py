@@ -83,23 +83,39 @@ def _build_store():
 
 def _run_case(prune: bool) -> dict:
     store, a_id, b_id = _build_store()
+    # Linear's alignment (seam-1 re-verdict, Nov 22, 2026):
+    # B's stored content is captured BEFORE any pruning and
+    # compared exactly at every stage — the full invariant
+    # the stronger probe asserts, not marker presence.
+    before = next(r for r in store.all() if r.id == b_id).content
+    stored_after_prune = before
     if prune:
         cloud = MemoryCloud(store=store)
         cloud.decay_and_prune(now=PRUNE_AT)
         fresh = MemoryCloud(store=store)
         ids = {r.id for r in fresh.store.all()}
         assert a_id not in ids and b_id in ids and fresh.verify_chain()
-    b = next(r for r in store.all() if r.id == b_id)
-    stored_marker = MARKER in b.content
+        stored_after_prune = next(
+            r for r in store.all() if r.id == b_id
+        ).content
     calls: list = []
     system = DualitySystem(store=store, model=_recording_model(calls))
     result = system.run("Give me a plain status summary.")
+    stored_after_run = next(
+        r for r in store.all() if r.id == b_id
+    ).content
     recall_ids = [
         e["id"] for entries in result["recall"].values() for e in entries
     ]
+    # A is itself selected, so generic marker presence does
+    # not prove B's QUOTATION rendered: assert the specific
+    # quoted line in BOTH hemisphere messages.
+    quote_line = "  - quoted [episodic]: " + A_CONTENT
     return {
         "b_selected": b_id in recall_ids,
-        "stored_marker": stored_marker,
+        "stored_exact": before == stored_after_prune == stored_after_run,
+        "quote_in_both": len(calls) == 2
+        and all(quote_line in c["user"] for c in calls),
         "marker_in_model": MARKER in json.dumps(calls),
         "marker_in_recall": MARKER in json.dumps(result["recall"]),
         "calls": len(calls),
@@ -109,21 +125,25 @@ def _run_case(prune: bool) -> dict:
 def main():
     a = _run_case(prune=False)
     print(f"CASE A (A present):  B selected={a['b_selected']}  "
-          f"marker in model input={a['marker_in_model']}  "
+          f"B quotation in both model messages={a['quote_in_both']}  "
           f"marker in structured recall={a['marker_in_recall']}  "
           f"model calls={a['calls']}")
     b = _run_case(prune=True)
     print(f"CASE B (A pruned):   B selected={b['b_selected']}  "
-          f"B stored quotation unchanged={b['stored_marker']}  "
+          f"B stored content exact throughout={b['stored_exact']}  "
           f"marker in model input={b['marker_in_model']}  "
           f"marker in structured recall={b['marker_in_recall']}  "
           f"model calls={b['calls']}")
     ok = (
-        a["b_selected"] and a["marker_in_model"]
-        and b["b_selected"] and b["stored_marker"]
+        a["b_selected"] and a["quote_in_both"]
+        and b["b_selected"] and b["stored_exact"]
         and not b["marker_in_model"] and not b["marker_in_recall"]
     )
     print("ACCEPTANCE:", "PASS" if ok else "FAIL")
+    # Linear's correction (seam-1 hold, Nov 22, 2026): a FAIL
+    # print with a success exit code is a harness that can lie
+    # to a script. Exit nonzero on failure.
+    raise SystemExit(0 if ok else 1)
 
 
 if __name__ == "__main__":

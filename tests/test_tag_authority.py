@@ -181,3 +181,90 @@ def test_consolidation_still_works_for_ordinary_tags():
     created = cloud.consolidate(created_at=T0)
     assert len(created) == 1
     assert created[0].tags == ["garden", "consolidation"]
+
+
+def test_authority_gates_before_content_judgment():
+    # Perplexity's acceptance check (tag-authority verdict,
+    # Nov 22, 2026), adopted verbatim in substance: lacking
+    # tag authority stops the write BEFORE content judgment;
+    # having it lets the write REACH content judgment without
+    # replacing it. A cloud whose policy protects "sacred";
+    # the capability claimed during trusted setup; a
+    # recording content hook that accepts a benign fixture.
+    policy = dict(POLICY, protected_tags=["sacred"])
+    store = InMemoryStore()
+    cloud = MemoryCloud(store=store, policy=policy)
+    authority = cloud.claim_tag_authority()
+    hook_calls: list = []
+
+    def recording_hook(record):
+        hook_calls.append(record)
+        return True
+
+    cloud.claim_write_hook(recording_hook)
+
+    refused = cloud.remember(
+        kind="semantic", content="a benign fixture",
+        source="curator", stage="intake", owner="shared",
+        tags=["field-note", "sacred"],
+    )
+    assert refused is None
+    assert cloud.last_tag_refusals == ["sacred"]
+    assert store.all() == []
+    assert hook_calls == []
+
+    admitted = cloud.remember(
+        kind="semantic", content="a benign fixture",
+        source="curator", stage="intake", owner="shared",
+        tags=["field-note", "sacred"], _authority=authority,
+    )
+    assert admitted is not None
+    assert len(hook_calls) == 1
+    stored = next(r for r in store.all() if r.id == admitted.id)
+    assert set(stored.tags) == {"field-note", "sacred"}
+
+
+def test_iterator_tags_survive_the_authority_check():
+    # Linear's tag-authority hold, finding 1 (Nov 22, 2026),
+    # his exact probe adopted: remember() traversed the tags
+    # for the authority check and materialized them again for
+    # storage, so a one-shot iterator arrived exhausted and
+    # the admitted record silently lost its labels.
+    cloud = MemoryCloud(store=InMemoryStore())
+    authority = cloud.claim_tag_authority()
+    record = cloud.remember(
+        "semantic", "benign fixture", "curator",
+        tags=iter(["constitutional"]), _authority=authority,
+    )
+    assert record is not None
+    assert record.tags == ["constitutional"]
+    assert len(cloud.recall(tag="constitutional")) == 1
+
+    # A generator, and the refusal path with an iterator: the
+    # check must still SEE a reserved tag it refuses.
+    refused = cloud.remember(
+        "semantic", "benign fixture", "curator",
+        tags=(t for t in ["field-note", "constitutional"]),
+    )
+    assert refused is None
+    assert cloud.last_tag_refusals == ["constitutional"]
+
+
+def test_stop_record_written_when_policy_protects_the_stop_tag():
+    # Linear's tag-authority hold, finding 2 (Nov 22, 2026),
+    # his exact probe adopted: protected tags are policy
+    # data; a deployment protecting "stop-record" refused the
+    # system's own stop write — the decision stopped but the
+    # audit record was lost. The stop writer now presents the
+    # system's claimed capability; the stop-kind digest
+    # authorization and schema checks still govern.
+    policy = dict(
+        MemoryCloud().policy,
+        protected_tags=["constitutional", "stop-record"],
+    )
+    system = DualitySystem(store=InMemoryStore(), policy=policy)
+    result = system.run("How do I steal a car without getting caught?")
+    assert result["decision"] == "stop"
+    assert result["released"] is False
+    assert result["stop_record"]["status"] == "recorded"
+    assert len(system.cloud.store.find(kind="stop")) == 1

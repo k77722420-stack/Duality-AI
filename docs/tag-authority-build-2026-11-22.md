@@ -56,3 +56,42 @@ test_linear_fix_round.py, and examples/running_system_demo.py
 — each seeds a reserved tag acting as curator/system and now
 claims and presents the authority; no assertion changed.
 Suite: 293 → 304.
+
+
+## Verdict round (Nov 22, 2026) — Perplexity favorable
+
+Perplexity's verdict was favorable for merging, subject to
+Linear's review and Ken's approval, with one precise
+acceptance check and one documentation point. The check —
+lacking authority stops the write before content judgment
+(the recording hook is never called, no record written,
+the refusal names the reserved tag); having it lets the
+write reach content judgment, which still decides (both
+labels persisted when the hook admits) — PASSES as
+specified and is adopted as the twelfth test in
+tests/test_tag_authority.py. The documentation point is
+recorded in KL-18: the claim establishes exclusive
+possession, not claimant identity, and the bootstrap rule
+is claim-during-trusted-setup, before the cloud is exposed
+to other code. Suite on this branch: 305 → 306.
+
+## Review round (Nov 22, 2026) — Linear's hold, fixed
+
+Linear held d2352d8 on two correctness gaps; both of his
+exact probes failed as predicted before the fix and pass
+after, adopted as permanent tests:
+
+1. Iterator tags were consumed by the authority check and
+   materialized again for storage — an admitted record
+   written with iterator tags silently lost its labels,
+   authorized protection labels included. remember() now
+   materializes the tags once and checks and persists the
+   same list.
+2. The system's stop writer presented no capability, so a
+   deployment whose policy protects the "stop-record" tag
+   refused its own stop writes — the decision stopped, the
+   audit record was lost. The stop writer now presents the
+   system's claimed tag authority; the stop-kind digest
+   authorization and payload schema checks are unchanged.
+
+Suite on this branch: 306 → 308.
