@@ -514,6 +514,12 @@ class DualitySystem:
             store=store, policy_path=policy_path, policy=policy
         )
         self.cloud.claim_write_hook(self._judge_write)
+        # Tag authority (KL-18, Nov 22, 2026): the system is
+        # the cloud's trusted writer — it claims the capability
+        # so its own episode writes may carry their gate:
+        # decision tags. Other callers of the same cloud get
+        # no such right from the system's claim.
+        self._tag_authority = self.cloud.claim_tag_authority()
         self.last_write_judgment: dict | None = None
         # Digests of episode payloads THIS system has constructed in
         # run() and not yet written — the door's out-of-band
@@ -942,11 +948,27 @@ class DualitySystem:
         the stored records are never rewritten by the filter.
         """
         recall: dict[str, list[dict]] = {}
-        excluded: list[str] = []
+        # ONE verified snapshot per run (Perplexity's Ask 3
+        # recommendation, Nov 22, 2026; built the same evening):
+        # a single cloud.recall() pass verifies, decays, and
+        # sorts the whole store once, and everything this run
+        # needs — the eligibility set, the genuine-embedding
+        # map, the per-shelf precedent — is drawn from that one
+        # snapshot. The previous shape recalled four times (one
+        # global pass plus one per shelf), re-verifying every
+        # seal four times and letting the four reads disagree
+        # about a store changing underneath the run. Partitioning
+        # the snapshot by owner preserves each shelf's
+        # strongest-first order (the snapshot's sort is stable
+        # and global), and the exclusions surface is the single
+        # pass's own list.
+        verified = self.cloud.recall()
+        # The cloud excludes records whose provenance seal does
+        # not verify; surface the exclusions, never hide them.
+        excluded = list(self.cloud.last_recall_exclusions)
         # Reuse policy (Ken's decision, Nov 22, 2026): the ids the
         # cloud itself serves as verified are the quotations'
-        # eligibility set. Computed once, before the shelf reads.
-        verified = self.cloud.recall()
+        # eligibility set.
         eligible_ids = {record.id for record in verified}
         # Provenance binding (Nov 22, 2026): the genuine embedding
         # of every verified record, recomputed once per run, so
@@ -956,12 +978,14 @@ class DualitySystem:
             record.id: _expected_quotation_evidence(record, eligible_ids)
             for record in verified
         }
+        by_shelf: dict[str, list] = {
+            "logical": [], "creative": [], "shared": []
+        }
+        for record in verified:
+            by_shelf[record.owner].append(record)
         quotation_drops: list = []
         for shelf in ("logical", "creative", "shared"):
-            records = self.cloud.recall(owner=shelf)
-            # The cloud excludes records whose provenance seal does
-            # not verify; surface the exclusions, never hide them.
-            excluded.extend(self.cloud.last_recall_exclusions)
+            records = by_shelf[shelf]
             summaries = []
             for record in records:
                 content, drops = _filter_dead_quotations(
@@ -1125,6 +1149,7 @@ class DualitySystem:
             stage="post-gate",
             owner="shared",
             tags=["pipeline-run", f"gate:{trace['decision']}"],
+            _authority=self._tag_authority,
         )
         episode = {
             "written": record is not None,
@@ -1254,6 +1279,16 @@ class DualitySystem:
             stage="stop-record",
             owner="barrier",
             tags=["stop-record"],
+            # The system's own trusted write presents its
+            # claimed tag authority (Linear's tag-authority
+            # hold, Nov 22, 2026): "stop-record" is deliberately
+            # not reserved in the shipped policy, but protected
+            # tags are policy data — a deployment that protects
+            # the tag must not silently lose its stop audit
+            # records to a tag refusal. The stop-kind digest
+            # authorization and the payload schema checks are
+            # unchanged and still govern the write.
+            _authority=self._tag_authority,
         )
         if record is None:
             return {"status": "failed", "record_id": None}
