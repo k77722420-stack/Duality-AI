@@ -56,3 +56,21 @@ test_linear_fix_round.py, and examples/running_system_demo.py
 — each seeds a reserved tag acting as curator/system and now
 claims and presents the authority; no assertion changed.
 Suite: 293 → 304.
+
+
+## Verdict round (Nov 22, 2026) — Perplexity favorable
+
+Perplexity's verdict was favorable for merging, subject to
+Linear's review and Ken's approval, with one precise
+acceptance check and one documentation point. The check —
+lacking authority stops the write before content judgment
+(the recording hook is never called, no record written,
+the refusal names the reserved tag); having it lets the
+write reach content judgment, which still decides (both
+labels persisted when the hook admits) — PASSES as
+specified and is adopted as the twelfth test in
+tests/test_tag_authority.py. The documentation point is
+recorded in KL-18: the claim establishes exclusive
+possession, not claimant identity, and the bootstrap rule
+is claim-during-trusted-setup, before the cloud is exposed
+to other code. Suite on this branch: 305 → 306.
