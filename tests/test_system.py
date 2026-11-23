@@ -120,12 +120,15 @@ def test_stopped_step_surges_decodes_and_is_refused_at_the_door():
     # The episode's verbatim content carries the flagged marker, and
     # the guarded door — the gate itself, claiming no leniency for a
     # memory write — refused it. The refusal and its judgment are in
-    # the result, not hidden; the cloud stays empty.
+    # the result, not hidden. The cloud holds no episode; since
+    # TEC-12 (Nov 22, 2026) it holds exactly the metadata-only
+    # stop record — the flagged payload itself is never stored.
     episode = result["episode"]
     assert episode["written"] is False
     assert episode["record_id"] is None
     assert episode["write_judgment"]["decision"] == "stop"
-    assert system.cloud.store.all() == []
+    records = system.cloud.store.all()
+    assert [r.kind for r in records] == ["stop"]
 
 
 def test_leniency_step_proceeds_and_the_leniency_is_on_record():

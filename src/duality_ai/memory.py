@@ -82,7 +82,7 @@ _DEFAULT_POLICY_PATH = (
 
 GENESIS_HASH = "DUALITY-MEMORY-START"
 
-RECORD_KINDS = ("episodic", "semantic")
+RECORD_KINDS = ("episodic", "semantic", "stop")
 RECORD_OWNERS = ("logical", "creative", "shared", "barrier")
 CONSOLIDATED_TAG = "consolidated"
 
@@ -650,6 +650,13 @@ class MemoryCloud:
         self.halflife_days: float = float(self.policy["halflife_days"])
         self.prune_threshold: float = float(self.policy["prune_threshold"])
         self.protected_tags: list[str] = list(self.policy["protected_tags"])
+        # Stop records (TEC-12, Nov 22, 2026): whether the audit
+        # trail of gate stops rides a protected retention or decays
+        # under the half-life law like every other record — policy
+        # data, Ken's call at the build; default is the law.
+        self.stop_records_protected: bool = bool(
+            self.policy.get("stop_records_protected", False)
+        )
         self.consolidate_min_episodes: int = int(
             self.policy["consolidate_min_episodes"]
         )
@@ -938,6 +945,16 @@ class MemoryCloud:
         snapshot = self.store.all()
         verified = {id(r) for r in self._verified_records(snapshot)}
         found = [r for r in snapshot if _matches(r, kind, owner, tag)]
+        # Stop records are NOT eligible for ordinary recall
+        # (TEC-12 design, Nov 22, 2026): they are an audit trail,
+        # consumed only through a dedicated read path when one
+        # is built — never served as precedent, whatever shelf
+        # or kind a caller asks for. The exclusion lives here,
+        # at the memory layer, so every recall consumer inherits
+        # it (review fix, Nov 22, 2026: shelf selection in the
+        # system layer alone let an imported stop record into
+        # assembled recall and poisoned the next episode write).
+        found = [r for r in found if r.kind != "stop"]
         if text is not None:
             needle = text.lower()
             found = [r for r in found if needle in r.content.lower()]
@@ -1112,6 +1129,8 @@ class MemoryCloud:
         pruned = 0
         for record in self.store.all():
             if any(tag in self.protected_tags for tag in record.tags):
+                continue
+            if record.kind == "stop" and self.stop_records_protected:
                 continue
             if self._decayed_strength(record, moment) < self.prune_threshold:
                 if self.store.remove(record.id):

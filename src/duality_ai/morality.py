@@ -92,6 +92,7 @@ class MoralityGate:
             data = json.load(handle)
         self.clauses: list[dict] = data["clauses"]
         self.library_name: str = data.get("library", "morality clause library")
+        self.library_version: str = data.get("version", "unversioned")
         self.hard_clauses = [c for c in self.clauses if c["kind"] == "hard"]
         self.leniency_clauses = [
             c for c in self.clauses if c["kind"] == "leniency"
