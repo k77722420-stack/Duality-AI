@@ -290,18 +290,30 @@ def test_ordinary_record_with_a_recalled_key_does_not_crash():
     assert refused is None
 
     # And an IMPORTED malformed envelope (store-level, past
-    # the door) still cannot crash the renderer.
-    from duality_ai.memory import MemoryRecord
+    # the door) still cannot crash the renderer. The
+    # prev_hash must be the real genesis (Linear's coverage
+    # correction, Nov 23, 2026): with a wrong genesis the
+    # record fails provenance and is excluded before the
+    # renderer ever sees it, and this test would pin
+    # nothing. With the correct genesis the record reaches
+    # served recall — asserted below, not assumed.
+    from duality_ai.memory import GENESIS_HASH, MemoryRecord
     store = InMemoryStore()
     imported = MemoryRecord(
         id="imported1", kind="semantic", owner="shared",
         content=json.dumps({"recalled": {"shared": "not a list"}}),
         source="import", stage="intake", tags=["field-note"],
         created_at="2026-11-22T00:00:00+00:00", strength=1.0,
-        prev_hash="0" * 64,
+        prev_hash=GENESIS_HASH,
     )
     imported.record_hash = imported.compute_hash()
     store.put(imported)
     system = DualitySystem(store=store)
     result = system.run("Give me a plain status summary.")
     assert result["episode"]["written"] is True
+    served_ids = {
+        entry["id"]
+        for entries in result["recall"].values()
+        for entry in entries
+    }
+    assert "imported1" in served_ids
