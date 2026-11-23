@@ -81,6 +81,13 @@ def test_case_a_positive_control_marker_reaches_the_model():
     ]
     assert b_id in recall_ids
     assert MARKER in json.dumps(calls)
+    # Linear's correction (seam-1 hold, Nov 22, 2026): A is
+    # itself selected, so the marker's presence alone does not
+    # prove B's QUOTATION rendered. Assert B's specific quoted
+    # line in BOTH hemisphere messages.
+    quote_line = "  - quoted [episodic]: " + A_CONTENT
+    assert len(calls) == 2
+    assert all(quote_line in call["user"] for call in calls)
 
 
 def test_case_b_pruned_source_marker_reaches_no_model_call():
@@ -92,10 +99,15 @@ def test_case_b_pruned_source_marker_reaches_no_model_call():
     assert a_id not in ids and b_id in ids and fresh.verify_chain()
     b = next(r for r in store.all() if r.id == b_id)
     assert MARKER in b.content  # the archive is not a surface
+    before = b.content
 
     calls: list = []
     system = DualitySystem(store=store, model=_recording_model(calls))
     result = system.run("Give me a plain status summary.")
+    # Linear's correction: B's stored content is compared
+    # EXACTLY, before and after — not just for the marker.
+    b_after = next(r for r in store.all() if r.id == b_id)
+    assert b_after.content == before
     recall_ids = [
         e["id"] for entries in result["recall"].values() for e in entries
     ]
@@ -216,3 +228,77 @@ def test_a_prior_leniency_decision_reaches_the_next_model_input():
     second = DualitySystem(store=store, model=FakeModelClient(respond2))
     second.run("Give me a plain status summary.")
     assert "proceed_with_leniency" in json.dumps(calls)
+
+
+def test_ordinary_record_with_a_recalled_key_does_not_crash():
+    # Linear's blocking finding (seam-1 hold, Nov 22, 2026),
+    # his exact probe adopted: the write path legitimately
+    # admits ordinary records carrying any value under a
+    # "recalled" key; the renderer must not assume the
+    # episode envelope's shape. His probe verbatim first:
+    system = DualitySystem()
+    record = system.cloud.remember(
+        kind="semantic",
+        content=json.dumps({"recalled": ["ordinary observation"]}),
+        source="field-note",
+        stage="intake",
+        owner="shared",
+        tags=["field-note"],
+    )
+    assert record is not None
+    assert system.cloud.verify_chain()
+    result = system.run("Give me a plain status summary.")
+    assert result["episode"]["written"] is True
+
+    # The admitted family around it: any NON-dict value under
+    # the key is an ordinary record (the door's envelope
+    # verification engages only for dict-shaped envelopes).
+    for content in (
+        json.dumps({"recalled": "just a string"}),
+        json.dumps({"recalled": 42}),
+        json.dumps({"recalled": None}),
+    ):
+        system = DualitySystem()
+        record = system.cloud.remember(
+            kind="semantic",
+            content=content,
+            source="field-note",
+            stage="intake",
+            owner="shared",
+            tags=["field-note"],
+        )
+        assert record is not None, content
+        result = system.run("Give me a plain status summary.")
+        assert result["episode"]["written"] is True, content
+
+    # A dict-shaped but malformed envelope is refused at the
+    # door instead (the binding contract: its entries cannot
+    # be verified) — pinned so the two boundaries' division
+    # of labor stays explicit.
+    system = DualitySystem()
+    refused = system.cloud.remember(
+        kind="semantic",
+        content=json.dumps({"recalled": {"shared": "not a list"}}),
+        source="field-note",
+        stage="intake",
+        owner="shared",
+        tags=["field-note"],
+    )
+    assert refused is None
+
+    # And an IMPORTED malformed envelope (store-level, past
+    # the door) still cannot crash the renderer.
+    from duality_ai.memory import MemoryRecord
+    store = InMemoryStore()
+    imported = MemoryRecord(
+        id="imported1", kind="semantic", owner="shared",
+        content=json.dumps({"recalled": {"shared": "not a list"}}),
+        source="import", stage="intake", tags=["field-note"],
+        created_at="2026-11-22T00:00:00+00:00", strength=1.0,
+        prev_hash="0" * 64,
+    )
+    imported.record_hash = imported.compute_hash()
+    store.put(imported)
+    system = DualitySystem(store=store)
+    result = system.run("Give me a plain status summary.")
+    assert result["episode"]["written"] is True

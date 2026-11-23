@@ -245,13 +245,29 @@ def _precedent_block(recall: dict) -> str:
                 parsed = json.loads(entry["content"])
             except (ValueError, TypeError, RecursionError):
                 parsed = None
-            if isinstance(parsed, dict):
-                embedded = parsed.get("recalled") or {}
+            # The envelope is traversed only at the shapes the
+            # episode contract actually mints (Linear's seam-1
+            # hold, Nov 22, 2026): an ordinary record may carry
+            # any value under a "recalled" key — a list, a
+            # string, a dict of arbitrary shape — because the
+            # write path admits ordinary records without an
+            # envelope contract. Anything that is not a dict of
+            # lists of dicts is that record's own content, not
+            # a quotation envelope, and renders no quoted lines.
+            embedded = (
+                parsed.get("recalled") if isinstance(parsed, dict)
+                else None
+            )
+            if isinstance(embedded, dict):
                 for sub_entries in embedded.values():
+                    if not isinstance(sub_entries, list):
+                        continue
                     for sub in sub_entries[:_RECALL_EMBED_LIMIT]:
+                        if not isinstance(sub, dict):
+                            continue
                         if "excerpt" in sub:
                             lines.append(
-                                f"  - quoted [{sub['kind']}]: "
+                                f"  - quoted [{sub.get('kind')}]: "
                                 f"{sub['excerpt']}"
                             )
                         elif "decision" in sub:

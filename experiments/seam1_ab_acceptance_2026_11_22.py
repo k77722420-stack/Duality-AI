@@ -124,6 +124,10 @@ def main():
         and not b["marker_in_model"] and not b["marker_in_recall"]
     )
     print("ACCEPTANCE:", "PASS" if ok else "FAIL")
+    # Linear's correction (seam-1 hold, Nov 22, 2026): a FAIL
+    # print with a success exit code is a harness that can lie
+    # to a script. Exit nonzero on failure.
+    raise SystemExit(0 if ok else 1)
 
 
 if __name__ == "__main__":
