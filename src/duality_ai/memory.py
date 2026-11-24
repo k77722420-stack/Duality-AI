@@ -559,9 +559,17 @@ class JsonFileStore(MemoryStore):
             return
         with self._locked():
             self._reload_locked()
+            # The entry fingerprint is computed BEFORE the
+            # ownership flags are set: if it raises — a record
+            # whose canonical form cannot be encoded, e.g. a
+            # lone surrogate loaded from JSON — no flag is left
+            # set, so the store is not wedged into a state
+            # where later same-thread batches join a dead batch
+            # and saves defer indefinitely (Linear's hold on
+            # 717e361, Nov 24, 2026).
+            entry_fingerprint = self._fingerprint_locked()
             self._batching = True
             self._batch_owner = threading.get_ident()
-            entry_fingerprint = self._fingerprint_locked()
             try:
                 yield
                 # Publication is for changes. A batch whose

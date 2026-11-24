@@ -454,3 +454,42 @@ def test_healthy_salvage_creates_no_store_file(tmp_path):
     assert cloud.salvage(quarantine)["status"] == "healthy"
     assert not path.exists()
     assert not quarantine.exists()
+
+
+# -- Linear's round-4 case (hold on 717e361) -------------------
+#
+# The batch entry fingerprint was computed AFTER the ownership
+# flags were set but BEFORE the try/finally that clears them.
+# A fingerprint failure — a lone surrogate loaded from JSON,
+# which json.loads accepts but UTF-8 encoding rejects — left
+# _batching set forever: later same-thread batches silently
+# joined the dead batch (no lock, no reload) and every save
+# deferred indefinitely. The fingerprint now computes before
+# the flags; the failure is loud, and the store stays usable.
+
+
+def test_fingerprint_failure_leaves_store_reusable(tmp_path):
+    path = tmp_path / "store.json"
+    quarantine = tmp_path / "quarantine.jsonl"
+    cloud = MemoryCloud(store=JsonFileStore(path))
+    assert cloud.remember("semantic", "honest record", "test")
+
+    data = json.loads(path.read_text())
+    data[0]["content"] = "honest\ud800record"  # lone surrogate
+    path.write_text(json.dumps(data))
+
+    poisoned = MemoryCloud(store=JsonFileStore(path))
+    store = poisoned.store
+    with pytest.raises(UnicodeEncodeError):
+        with store.batch():
+            pass
+    assert store._batching is False
+    assert store._batch_owner is None
+
+    # Repair the file; the SAME store instance must work again:
+    # its batches lock, reload, fingerprint, and commit.
+    data[0]["content"] = "honest record"
+    path.write_text(json.dumps(data))
+    assert poisoned.salvage(quarantine)["status"] == "healthy"
+    assert poisoned.remember("semantic", "after repair", "test")
+    assert "after repair" in path.read_text()

@@ -193,3 +193,31 @@ still publish exactly once, as before.
 
 Full suite: 326 passed. Perplexity's interruption and
 snapshot probes re-run: PASS.
+
+## Fix round 4 — Linear's hold on 717e361 (Nov 24, 2026)
+
+Linear kept the hold: the healthy no-op fix was correct,
+but the batch entry fingerprint was computed AFTER the
+ownership flags (_batching, _batch_owner) were set and
+BEFORE the try/finally that clears them. A fingerprint
+failure — a lone surrogate loaded from JSON, which
+json.loads accepts but UTF-8 encoding rejects — left the
+flags set forever: later same-thread batches silently
+joined the dead batch (no lock, no reload), and every
+save deferred indefinitely. His case was reproduced
+verbatim pre-fix (raise + wedged flags + a post-wedge
+remember that never reached disk + a second batch joining
+silently) and is now a permanent test in
+tests/test_salvage.py.
+
+Fix: the entry fingerprint is computed BEFORE the
+ownership flags are set, inside the same locked section.
+If it raises, no flag was ever set, the lock releases,
+and the failure is loud at its true point; the store
+stays fully usable once the underlying record problem is
+repaired. Post-fix probe: the raise still surfaces, the
+flags are clean, salvage over the repaired file reports
+healthy, and saves reach disk again.
+
+Full suite: 327 passed. Perplexity's interruption and
+snapshot probes re-run: PASS.
