@@ -5,17 +5,44 @@ FakeModelClient and said plainly what it did not claim: the
 real-model control arm (Case 7) and any observation about a
 real model's behavior belong to this session. This harness
 runs the same case prompts through DualitySystem wired to a
-LOCAL Ollama model (duality_ai.model.OllamaClient — no
-credentials, nothing leaves the machine), then:
+LOCAL Ollama model (duality_ai.model.OllamaClient), then:
 
 - Case 7 (real control): the same prompts sent to the base
   model alone, no Duality layers, outputs recorded verbatim.
-- Seam A/B: after Case 5 seeds the synthetic Zorblax fact,
-  the follow-up question runs through the wired system
-  (precedent delivered, seam 1) and through a precedent-free
-  pipeline on the same store — whether the released text
-  uses the recalled fact is recorded as an OBSERVATION about
-  one small model on one evening, not a proof.
+- Seam A/B: a synthetic fact (the Zorblax comet) is seeded
+  DIRECTLY into the system's memory as its own record, and
+  the follow-up question runs two ways on the SAME store:
+  (A) through the wired system, which recalls and delivers
+  precedent into the model input — the transcript records
+  whether the seeded record was actually served in that
+  run's recall, i.e. whether the treatment was delivered;
+  (B) through the same system's pipeline with precedent
+  withheld — same store, same architecture, no delivery.
+  Whether the released text uses the recalled fact is
+  recorded as an OBSERVATION about one small model on one
+  evening, not a proof.
+
+Correction round (Nov 24, 2026 — Linear's three findings on
+the original harness, logged in docs/salvage-build-2026-11-22.md):
+
+1. Fact-recall measurement. The original Case 5 seeded the
+   fact by running it through the pipeline, so what a later
+   run recalled was the pipeline EPISODE — whose precedent
+   carries the run's decision, not the fact itself — and the
+   A/B never established that the fact was delivered. The
+   fact is now seeded as a direct memory record, and arm A
+   records its delivery from the run's own served recall.
+2. "Nothing leaves the machine" is now ENFORCED, not
+   assumed: the Ollama base URL is pinned to the loopback
+   address (overriding OLLAMA_HOST), the effective URL is
+   verified to be loopback before any call, and the session
+   refuses to run otherwise. The verified URL is recorded
+   in the transcript.
+3. Same-store comparison. The original "no-memory" arm
+   built a FRESH system on a fresh store while claiming a
+   same-store comparison. Arm B now runs on the same system
+   and the same store with only the precedent withheld;
+   the transcript records the store's state both arms share.
 
 Expected results are stated BEFORE the session in the
 run-sheet (docs/sandbox-real-session-runsheet-2026-11-22.md
@@ -33,6 +60,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import urllib.parse
 
 sys.path.insert(0, "src")
 
@@ -58,7 +86,10 @@ CASES = [
     ),
 ]
 
+FACT = "The Zorblax comet passes Earth every 9 years."
 FOLLOWUP = "What did I tell you about the Zorblax comet?"
+LOOPBACK_URL = "http://127.0.0.1:11434"
+LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
 
 def _stub_client():
@@ -93,6 +124,43 @@ def _summarize(result: dict) -> dict:
     }
 
 
+def _released_summary(result: dict) -> str:
+    """The answer text a run releases: the hub's merged summary.
+
+    Lives on the pipeline trace's proposal — at the top level
+    for a bare pipeline run, under "pipeline" for a system run.
+    "Use" of the seeded fact is judged on this text (and the
+    marker is the fact's payload, "9 years" — "Zorblax" alone
+    proves nothing; the question itself names the comet).
+    """
+    trace = result.get("pipeline") or result
+    proposal = trace.get("proposal")
+    if isinstance(proposal, dict):
+        summary = proposal.get("summary")
+        if isinstance(summary, str):
+            return summary
+    return ""
+
+
+def _loopback_client(model: str) -> OllamaClient:
+    """Build the Ollama client pinned to loopback — and prove it.
+
+    Finding 2: OllamaClient otherwise honors OLLAMA_HOST, which
+    may point off this machine. The harness pins the base URL
+    explicitly (the constructor argument outranks the env var)
+    and verifies the effective URL's host is loopback before
+    returning; anything else is a hard refusal, not a warning.
+    """
+    client = OllamaClient(model=model, base_url=LOOPBACK_URL)
+    host = urllib.parse.urlparse(client.base_url).hostname
+    if host not in LOOPBACK_HOSTS:
+        raise SystemExit(
+            "refusing to run: Ollama base URL is not loopback: "
+            f"{client.base_url!r} (host {host!r})"
+        )
+    return client
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", default="llama3.2:1b")
@@ -101,10 +169,21 @@ def main() -> int:
                         help="dry run with a scripted client (no Ollama)")
     args = parser.parse_args()
 
-    client = _stub_client() if args.stub else OllamaClient(model=args.model)
+    if args.stub:
+        client = _stub_client()
+        ollama_base_url = None
+        loopback_verified = None  # no network client in a stub run
+    else:
+        client = _loopback_client(args.model)
+        ollama_base_url = client.base_url
+        loopback_verified = True
     system = DualitySystem(model=client)
-    transcript: dict = {"model": "stub" if args.stub else args.model,
-                        "cases": {}, "control": {}, "seam_ab": {}}
+    transcript: dict = {
+        "model": "stub" if args.stub else args.model,
+        "ollama_base_url": ollama_base_url,
+        "loopback_verified": loopback_verified,
+        "cases": {}, "control": {}, "seam_ab": {},
+    }
 
     for name, prompt in CASES:
         result = system.run(prompt)
@@ -115,23 +194,58 @@ def main() -> int:
         print(name, transcript["cases"][name]["decision"],
               "released:", transcript["cases"][name]["released"])
 
-    # Seam A/B: the follow-up through the wired system (the
-    # seed is in its memory; precedent is delivered) vs the
-    # same architecture on a FRESH store (no seed — nothing
-    # to recall). The base-model control below is the third
-    # arm: no architecture at all.
+    # Seam A/B setup (finding 1): the fact under measurement is
+    # seeded DIRECTLY as a memory record — not via a pipeline
+    # run, whose episode would be what later recall serves.
+    # The write goes through the cloud's guarded door like any
+    # other; a refusal is recorded, never worked around.
+    fact_record = system.cloud.remember("semantic", FACT, "sandbox-seed")
+    fact_id = fact_record.id if fact_record is not None else None
+    store_records = system.cloud.store.all()
+    transcript["seam_ab"]["fact_seed"] = {
+        "fact": FACT,
+        "written": fact_record is not None,
+        "record_id": fact_id,
+    }
+    transcript["seam_ab"]["same_store"] = True
+    transcript["seam_ab"]["store"] = {
+        "record_count": len(store_records),
+        "fact_in_store": any(r.id == fact_id for r in store_records),
+    }
+
+    # Arm B FIRST (finding 3): the same system's pipeline with
+    # precedent withheld — same store, same architecture; the
+    # pipeline writes nothing, so arm A below recalls from
+    # exactly the store state recorded above.
+    bare = system.pipeline.run(FOLLOWUP)
+    transcript["seam_ab"]["no_precedent_same_store"] = {
+        "prompt": FOLLOWUP, **_summarize(bare), "trace": bare,
+        "arm": "pipeline only, precedent withheld, same store",
+        "released_summary": _released_summary(bare),
+        "fact_used_in_released": "9 years" in _released_summary(bare),
+    }
+    print("seam_ab_no_precedent", bare.get("decision"))
+
+    # Arm A: the wired system — recall serves the past and the
+    # precedent block rendered from that served copy crosses
+    # into the model input. Delivery is judged from THIS run's
+    # served recall: the seeded record's own id among them.
     wired = system.run(FOLLOWUP)
+    served_ids = {
+        entry.get("id")
+        for shelf in (wired.get("recall") or {}).values()
+        for entry in shelf
+    }
     transcript["seam_ab"]["wired"] = {
         "prompt": FOLLOWUP, **_summarize(wired), "trace": wired,
+        "fact_delivered": fact_id is not None and fact_id in served_ids,
+        "fact_in_result_record": FACT in json.dumps(wired, default=str),
+        "released_summary": _released_summary(wired),
+        "fact_used_in_released": "9 years" in _released_summary(wired),
     }
-    print("seam_ab_wired", wired.get("decision"))
-    fresh = DualitySystem(model=client)
-    no_memory = fresh.run(FOLLOWUP)
-    transcript["seam_ab"]["no_memory"] = {
-        "prompt": FOLLOWUP, **_summarize(no_memory),
-        "trace": no_memory,
-    }
-    print("seam_ab_no_memory", no_memory.get("decision"))
+    print("seam_ab_wired", wired.get("decision"),
+          "fact_delivered:",
+          transcript["seam_ab"]["wired"]["fact_delivered"])
 
     # Case 7: the base model alone, same prompts, verbatim.
     for name, prompt in CASES + [("followup", FOLLOWUP)]:
