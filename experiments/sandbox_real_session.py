@@ -44,6 +44,13 @@ the original harness, logged in docs/salvage-build-2026-11-22.md):
    and the same store with only the precedent withheld;
    the transcript records the store's state both arms share.
 
+Second correction pass (same day — Linear's hold on the
+first corrected revision): the urllib transport itself is
+now locked (no environment proxies, no redirects — a
+loopback URL alone guarantees neither), and
+fact_used_in_released counts only text a run actually
+released: a stopped run's proposal is not a use.
+
 Expected results are stated BEFORE the session in the
 run-sheet (docs/sandbox-real-session-runsheet-2026-11-22.md
 in the session pack). Actuals are written verbatim to the
@@ -61,6 +68,7 @@ import argparse
 import json
 import sys
 import urllib.parse
+import urllib.request
 
 sys.path.insert(0, "src")
 
@@ -124,6 +132,21 @@ def _summarize(result: dict) -> dict:
     }
 
 
+def _fact_used(result: dict) -> bool:
+    """Whether the run's RELEASED text uses the seeded fact.
+
+    A stopped run releases nothing, so its proposal text —
+    however fact-laden — is not a use (Linear's hold on
+    0692d9a, Nov 24, 2026). The release flag and the proposal
+    both live on the pipeline trace: at the top level for a
+    bare pipeline run, under "pipeline" for a system run.
+    """
+    trace = result.get("pipeline") or result
+    if trace.get("released") is not True:
+        return False
+    return "9 years" in _released_summary(result)
+
+
 def _released_summary(result: dict) -> str:
     """The answer text a run releases: the hub's merged summary.
 
@@ -142,6 +165,38 @@ def _released_summary(result: dict) -> str:
     return ""
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuse every redirect: a 3xx is an error, never a move.
+
+    Returning None makes urllib raise HTTPError for the
+    redirect response instead of following it — the request
+    stays on the loopback URL it was addressed to.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _lock_transport() -> None:
+    """Pin urllib to direct, redirect-free connections.
+
+    The model transport (duality_ai.model._post_json) posts
+    via urllib.request.urlopen, which honors the process-wide
+    opener: by default that opener reads proxy settings from
+    the environment (a proxy could carry the "loopback"
+    request off this machine) and follows redirects (a 3xx
+    could move it). Installing an opener with an empty
+    ProxyHandler and a refusing redirect handler closes both
+    exits for every call this process makes (Linear's hold on
+    0692d9a, Nov 24, 2026).
+    """
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({}),
+        _NoRedirect(),
+    )
+    urllib.request.install_opener(opener)
+
+
 def _loopback_client(model: str) -> OllamaClient:
     """Build the Ollama client pinned to loopback — and prove it.
 
@@ -150,7 +205,11 @@ def _loopback_client(model: str) -> OllamaClient:
     explicitly (the constructor argument outranks the env var)
     and verifies the effective URL's host is loopback before
     returning; anything else is a hard refusal, not a warning.
+    The transport itself is locked separately (_lock_transport):
+    a loopback URL is no guarantee while proxies or redirects
+    can carry the request elsewhere.
     """
+    _lock_transport()
     client = OllamaClient(model=model, base_url=LOOPBACK_URL)
     host = urllib.parse.urlparse(client.base_url).hostname
     if host not in LOOPBACK_HOSTS:
@@ -173,15 +232,18 @@ def main() -> int:
         client = _stub_client()
         ollama_base_url = None
         loopback_verified = None  # no network client in a stub run
+        transport_locked = None
     else:
         client = _loopback_client(args.model)
         ollama_base_url = client.base_url
         loopback_verified = True
+        transport_locked = True  # _loopback_client locked it
     system = DualitySystem(model=client)
     transcript: dict = {
         "model": "stub" if args.stub else args.model,
         "ollama_base_url": ollama_base_url,
         "loopback_verified": loopback_verified,
+        "transport_locked": transport_locked,
         "cases": {}, "control": {}, "seam_ab": {},
     }
 
@@ -222,7 +284,7 @@ def main() -> int:
         "prompt": FOLLOWUP, **_summarize(bare), "trace": bare,
         "arm": "pipeline only, precedent withheld, same store",
         "released_summary": _released_summary(bare),
-        "fact_used_in_released": "9 years" in _released_summary(bare),
+        "fact_used_in_released": _fact_used(bare),
     }
     print("seam_ab_no_precedent", bare.get("decision"))
 
@@ -241,7 +303,7 @@ def main() -> int:
         "fact_delivered": fact_id is not None and fact_id in served_ids,
         "fact_in_result_record": FACT in json.dumps(wired, default=str),
         "released_summary": _released_summary(wired),
-        "fact_used_in_released": "9 years" in _released_summary(wired),
+        "fact_used_in_released": _fact_used(wired),
     }
     print("seam_ab_wired", wired.get("decision"),
           "fact_delivered:",
