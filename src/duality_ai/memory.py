@@ -87,6 +87,15 @@ RECORD_OWNERS = ("logical", "creative", "shared", "barrier")
 CONSOLIDATED_TAG = "consolidated"
 
 
+def _canonical_payload(record: MemoryRecord) -> str:
+    """The record's canonical payload identity: the same
+    JSON form its seal is computed over. Python equality is
+    NOT payload identity — 1.0 == 1 in Python, but their
+    canonical encodings, and therefore their record hashes,
+    differ — so identity checks use this form everywhere."""
+    return json.dumps(record.to_dict(), sort_keys=True)
+
+
 def _is_reserved_tag(tag: str, protected_tags) -> bool:
     """Whether a tag carries authority a mechanism obeys.
 
@@ -243,6 +252,24 @@ class MemoryStore(ABC):
     def remove(self, record_id: str) -> bool:
         """Remove the record with this id. Returns True if one was."""
 
+    def remove_one(self, record: MemoryRecord) -> bool:
+        """Remove ONE occurrence of this exact record.
+
+        Matches on the record's canonical payload identity,
+        not its id alone: two records may share an id (a
+        corrupt copied-id twin beside its honest original),
+        and removing by id would take both. This default
+        serves stores where ids are unique; list-backed
+        stores override it to remove a single occurrence
+        from the sequence.
+        """
+        stored = self.get(record.id)
+        if stored is not None and _canonical_payload(
+            stored
+        ) == _canonical_payload(record):
+            return self.remove(record.id)
+        return False
+
 
 def _matches(
     record: MemoryRecord,
@@ -279,6 +306,15 @@ class InMemoryStore(MemoryStore):
 
     def remove(self, record_id: str) -> bool:
         return self._records.pop(record_id, None) is not None
+
+    def remove_one(self, record: MemoryRecord) -> bool:
+        stored = self._records.get(record.id)
+        if stored is not None and _canonical_payload(
+            stored
+        ) == _canonical_payload(record):
+            del self._records[record.id]
+            return True
+        return False
 
 
 class JsonFileStore(MemoryStore):
@@ -455,6 +491,22 @@ class JsonFileStore(MemoryStore):
                 tmp.unlink()
             raise
 
+    def _fingerprint_locked(self) -> str:
+        """A hash of the working sequence as publication
+        would serialize it. The caller must hold the lock.
+
+        Batch change detection: if the fingerprint at exit
+        equals the one taken at entry, the batch changed
+        nothing, and publication would only rewrite identical
+        contents — so it is skipped.
+        """
+        payload = json.dumps(
+            [r.to_dict() for r in self._records],
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
     def _save(self) -> None:
         """Save now — unless a batch is deferring the commit."""
         if self._batching:
@@ -507,11 +559,29 @@ class JsonFileStore(MemoryStore):
             return
         with self._locked():
             self._reload_locked()
+            # The entry fingerprint is computed BEFORE the
+            # ownership flags are set: if it raises — a record
+            # whose canonical form cannot be encoded, e.g. a
+            # lone surrogate loaded from JSON — no flag is left
+            # set, so the store is not wedged into a state
+            # where later same-thread batches join a dead batch
+            # and saves defer indefinitely (Linear's hold on
+            # 717e361, Nov 24, 2026).
+            entry_fingerprint = self._fingerprint_locked()
             self._batching = True
             self._batch_owner = threading.get_ident()
             try:
                 yield
-                self._save_locked()
+                # Publication is for changes. A batch whose
+                # working sequence is exactly what it loaded
+                # — salvage's healthy no-op is the standing
+                # case — exits without touching the file: no
+                # replacement, no file created from nothing,
+                # no publication failure where no repair was
+                # needed (Linear's hold on 89de400, Nov 23,
+                # 2026).
+                if self._fingerprint_locked() != entry_fingerprint:
+                    self._save_locked()
             except BaseException:
                 self._reload_locked()  # discard the uncommitted work
                 raise
@@ -622,6 +692,34 @@ class JsonFileStore(MemoryStore):
                 if not self._batching:
                     # As in put(): a removal whose save failed is
                     # not a removal — restore the working copy.
+                    self._reload_locked()
+                raise
+            return True
+
+    def remove_one(self, record: MemoryRecord) -> bool:
+        """Remove a single occurrence of this exact record.
+
+        Salvage classifies individual records, and a list
+        store can hold two records under one id (an honest
+        original and a corrupt copied-id twin): remove() by
+        id would delete both. This removes the first entry
+        whose full payload equals the given record's, and
+        nothing else (Linear's salvage hold, Nov 23, 2026).
+        """
+        with self._locked():
+            if not self._batching:
+                self._reload_locked()
+            target = _canonical_payload(record)
+            for index, stored in enumerate(self._records):
+                if _canonical_payload(stored) == target:
+                    del self._records[index]
+                    break
+            else:
+                return False
+            try:
+                self._save()
+            except BaseException:
+                if not self._batching:
                     self._reload_locked()
                 raise
             return True
@@ -878,6 +976,205 @@ class MemoryCloud:
             persist = getattr(self.store, "_persist_mutation", None)
             if persist is not None:
                 persist(record)
+
+    # -- salvage ---------------------------------------------------------
+
+    def salvage(self, quarantine_path) -> dict:
+        """Repair a broken chain — OPERATOR-INVOKED ONLY.
+
+        The salvage design (docs/salvage-repair-design-2026-11-22.md,
+        Ken's Decision 4): verify_chain() is all-or-nothing, so
+        one corrupt record freezes attestation and maintenance
+        forever, while recall() judges per record and keeps
+        serving the intact past. Salvage is the repair path:
+
+        - A record failing its OWN seal (its stored hash does
+          not recompute from its contents) is quarantined:
+          removed from the store and preserved VERBATIM in a
+          JSON-lines side file the operator names — evidence,
+          never deleted, never resealed over. The append is
+          idempotent per exact payload: a repair interrupted
+          after the append but before the batch commits is
+          retried against the same degraded store, and each
+          record's exact payload is preserved exactly once —
+          while a record whose corruption changed between
+          attempts is new evidence and is preserved again.
+          Removal is by exact record, never by id alone, so
+          the survivor sequence is preserved (an honest
+          original that shares an id with a corrupt twin
+          survives its twin's removal).
+        - A record whose own seal verifies but whose LINKAGE
+          is broken (an out-of-band deletion or insertion
+          shifted the chain) is kept; the chain is resealed
+          over the survivors and each gap is recorded.
+        - The repair appends its own record in-chain —
+          metadata only, the stop-record discipline — so the
+          chain itself attests that a salvage happened and
+          what it cost.
+
+        Salvage never runs from run(), recall(), or
+        maintenance: a repair that fires itself could be made
+        to fire by whoever corrupts a record. A healthy store
+        is a no-op — nothing written, nothing appended.
+
+        Classification reads the sequence the repair batch
+        reloaded, never whatever an already-open store
+        happens to hold, and exactness is judged on each
+        record's canonical payload — the same form its seal
+        covers — never on Python equality. A classified
+        removal that fails aborts the repair with nothing
+        resealed.
+        """
+        stamp = _as_iso(None)
+        outcome = None
+        with self._store_batch():
+            # Classification happens HERE, on the working
+            # sequence the batch actually holds (Linear's
+            # hold on 9230a5e, Nov 23, 2026): the file store
+            # reloaded that sequence from disk as the batch
+            # opened, so an offline change completed before
+            # salvage started is judged exactly as it stands
+            # — never classified from a stale in-memory
+            # snapshot and resealed unexamined, and never
+            # declared healthy over damage the snapshot
+            # cannot see. No concurrent writer is required
+            # for the stale failure; a finished offline edit
+            # suffices.
+            records = self.store.all()
+            expected_prev = GENESIS_HASH
+            quarantined: list = []
+            gaps: list = []
+            for position, record in enumerate(records):
+                if record.record_hash != record.compute_hash():
+                    quarantined.append((record, "seal_mismatch"))
+                    continue
+                if record.prev_hash != expected_prev:
+                    gaps.append({
+                        "position": position,
+                        "record_id": record.id,
+                        "expected_prev": expected_prev,
+                        "found_prev": record.prev_hash,
+                    })
+                expected_prev = record.record_hash
+
+            if not quarantined and not gaps:
+                outcome = {
+                    "status": "healthy",
+                    "quarantined": [],
+                    "gaps": [],
+                    "salvage_record_id": None,
+                }
+            if quarantined:
+                path = Path(quarantine_path)
+                # Idempotent evidence (Perplexity's interruption
+                # acceptance test, Nov 23, 2026; Linear's salvage
+                # hold, same day): the batch commits AFTER this
+                # append, so a repair killed between the two is
+                # retried against the same degraded store.
+                # Preservation is keyed on the record's FULL
+                # payload, never its id alone: an identical
+                # retry preserves nothing twice, but a record
+                # whose corruption CHANGED between attempts is
+                # different evidence and is preserved again —
+                # id-only dedupe silently destroyed it. A line
+                # that does not parse (a write torn by the kill
+                # itself) preserves nothing and blocks nothing.
+                preserved: set = set()
+                if path.exists():
+                    with path.open(encoding="utf-8") as handle:
+                        for line in handle:
+                            try:
+                                entry = json.loads(line)
+                            except ValueError:
+                                continue
+                            kept = entry.get("record") or {}
+                            if kept:
+                                preserved.add(
+                                    json.dumps(kept, sort_keys=True)
+                                )
+                fresh = [
+                    (record, reason)
+                    for record, reason in quarantined
+                    if json.dumps(asdict(record), sort_keys=True)
+                    not in preserved
+                ]
+                if fresh:
+                    # A torn tail must not swallow the new
+                    # evidence: if the side file does not end
+                    # in a newline (a partial line, or a whole
+                    # entry whose final newline never landed),
+                    # the first append would concatenate onto
+                    # it and the combined line would parse as
+                    # nothing. Terminate the tail first.
+                    separator = ""
+                    if path.exists() and path.stat().st_size > 0:
+                        with path.open("rb") as tail:
+                            tail.seek(-1, os.SEEK_END)
+                            if tail.read(1) != b"\n":
+                                separator = "\n"
+                    with path.open("a", encoding="utf-8") as handle:
+                        if separator:
+                            handle.write(separator)
+                        for record, reason in fresh:
+                            handle.write(json.dumps({
+                                "quarantined_at": stamp,
+                                "reason": reason,
+                                "record": asdict(record),
+                            }) + "\n")
+                # Remove exactly the classified records — the
+                # survivor sequence is preserved, never delete
+                # by id: a corrupt copied-id twin must not take
+                # its honest original down with it (Linear's
+                # hold, finding 3).
+                for record, _reason in quarantined:
+                    if not self.store.remove_one(record):
+                        # Abort, never launder: a classified
+                        # record that could not be removed
+                        # exactly must not be resealed as
+                        # valid. Raising inside the batch
+                        # discards the uncommitted repair —
+                        # the quarantine evidence already
+                        # appended stays preserved, and a
+                        # retry reclassifies from disk.
+                        raise ChainIntegrityError(
+                            "salvage aborted: a classified "
+                            "record could not be removed "
+                            "exactly; nothing was resealed"
+                        )
+            if quarantined or gaps:
+                self._reseal_chain()
+                event = MemoryRecord(
+                    id=uuid.uuid4().hex,
+                    kind="semantic",
+                    owner="shared",
+                    content=json.dumps({
+                        "event": "salvage",
+                        "timestamp": stamp,
+                        "quarantined": [
+                            {"id": r.id, "reason": reason}
+                            for r, reason in quarantined
+                        ],
+                        "gaps": gaps,
+                        "kept": len(self.store.all()),
+                    }),
+                    source="salvage",
+                    stage="maintenance",
+                    tags=["salvage-event"],
+                    created_at=stamp,
+                    strength=1.0,
+                    prev_hash=self.head_hash(),
+                )
+                event.record_hash = event.compute_hash()
+                self.store.put(event)
+                outcome = {
+                    "status": "repaired",
+                    "quarantined": [r.id for r, _ in quarantined],
+                    "gaps": gaps,
+                    "salvage_record_id": event.id,
+                }
+
+        outcome["chain_verified"] = self.verify_chain()
+        return outcome
 
     # -- decay -----------------------------------------------------------
 

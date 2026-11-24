@@ -81,3 +81,15 @@ was a recorded gate on a future build,
 not present behavior. The merge gate for the current branch is
 unchanged: this decision is not a gate on it (Perplexity's own
 framing, adopted).
+
+## Decision 4 — Salvage: Option A, quarantine-and-reseal (Ken, Nov 22, 2026)
+
+Ken adopted the salvage design's recommendations in full
+("engage with all recommendations"): Option A —
+quarantine-and-reseal. The sub-decisions as recommended:
+the quarantine is a side file beside the store, records
+preserved verbatim as evidence; the salvage event is
+recorded IN-CHAIN as an ordinary record, metadata only;
+and salvage is OPERATOR-INVOKED ONLY, forever — never
+automatic in run, recall, or maintenance. Build follows
+on branch duality-salvage-2026-11-22.
